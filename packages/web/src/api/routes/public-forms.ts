@@ -1,0 +1,441 @@
+import { Hono } from "hono";
+import { db } from "../database";
+import { tdb } from "../database/tenant";
+import * as schema from "../database/schema";
+import { and, eq } from "drizzle-orm";
+import { resolvePublicKey, hashApiKey } from "../middleware/auth";
+import { putObject } from "../lib/storage";
+import { rateLimit, keyByIp } from "../lib/rate-limit";
+import { fireEvent } from "../../services/dispatch";
+
+/**
+ * PUBLIC, UNAUTHENTICATED tenant intake forms.
+ *
+ *   GET  /api/public/forms/:companyId/:slug          -> form schema + branding
+ *   POST /api/public/forms/:companyId/:slug/submit    -> creates a pending lead
+ *
+ * The submit endpoint authenticates with a browser-safe publishable key
+ * (nvcpub_...) sent as `X-Public-Key` (or the form's bound key). Tenant is
+ * resolved from the URL + verified against the key's companyId. All writes go
+ * through tdb(companyId) so nothing can leak across tenants.
+ */
+
+const submitLimiter = rateLimit({
+  name: "intake",
+  limit: Number(process.env.RL_INTAKE_LIMIT ?? 30),
+  windowMs: 60_000,
+  keyFn: keyByIp,
+});
+
+// Public address lookups are cheap but proxy a paid API, so cap them per-IP.
+const geoLimiter = rateLimit({
+  name: "public-geo",
+  limit: Number(process.env.RL_PUBLIC_GEO_LIMIT ?? 60),
+  windowMs: 60_000,
+  keyFn: keyByIp,
+});
+
+const GMAPS_KEY = process.env.GOOGLE_MAPS_API_KEY;
+
+function clientIp(c: any): string {
+  return (
+    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+    c.req.header("x-real-ip") ||
+    "0.0.0.0"
+  );
+}
+
+async function loadForm(companyId: string, slug: string) {
+  const [row] = await db
+    .select()
+    .from(schema.intakeForms)
+    .where(and(eq(schema.intakeForms.companyId, companyId), eq(schema.intakeForms.slug, slug)))
+    .limit(1);
+  return row || null;
+}
+
+export const publicFormsRoutes = new Hono()
+  // ---- address autocomplete (no auth, rate-limited) ----
+  // Mirrors /geo/autocomplete but available to unauthenticated public forms so
+  // every address field on a public intake page can still auto-populate.
+  .get("/geo/autocomplete", geoLimiter, async (c) => {
+    const q = c.req.query("q")?.trim();
+    if (!q || q.length < 3) return c.json({ predictions: [] }, 200);
+
+    if (GMAPS_KEY) {
+      const url = new URL("https://maps.googleapis.com/maps/api/place/autocomplete/json");
+      url.searchParams.set("input", q);
+      url.searchParams.set("key", GMAPS_KEY);
+      url.searchParams.set("components", "country:ca|country:us");
+      const r = await fetch(url);
+      const data = (await r.json()) as any;
+      const predictions = (data.predictions || []).map((p: any) => ({
+        placeId: p.place_id,
+        description: p.description,
+        main: p.structured_formatting?.main_text ?? p.description,
+        secondary: p.structured_formatting?.secondary_text ?? "",
+      }));
+      return c.json({ predictions, provider: "google" }, 200);
+    }
+
+    const url = new URL("https://nominatim.openstreetmap.org/search");
+    url.searchParams.set("q", q);
+    url.searchParams.set("format", "json");
+    url.searchParams.set("addressdetails", "1");
+    url.searchParams.set("limit", "6");
+    const r = await fetch(url, { headers: { "User-Agent": "NVC360/1.0" } });
+    const data = (await r.json()) as any;
+    const predictions = (data || []).map((p: any) => ({
+      placeId: `osm:${p.lat},${p.lon}`,
+      description: p.display_name,
+      main: p.display_name.split(",")[0],
+      secondary: p.display_name.split(",").slice(1).join(",").trim(),
+      lat: parseFloat(p.lat),
+      lng: parseFloat(p.lon),
+    }));
+    return c.json({ predictions, provider: "osm" }, 200);
+  })
+  // ---- resolve a placeId to coords + formatted address (no auth, rate-limited) ----
+  .get("/geo/details", geoLimiter, async (c) => {
+    const placeId = c.req.query("placeId");
+    if (!placeId) return c.json({ message: "placeId required" }, 400);
+
+    if (placeId.startsWith("osm:")) {
+      const [lat, lng] = placeId.slice(4).split(",").map(Number);
+      return c.json({ lat, lng, address: c.req.query("description") || "" }, 200);
+    }
+
+    if (GMAPS_KEY) {
+      const url = new URL("https://maps.googleapis.com/maps/api/place/details/json");
+      url.searchParams.set("place_id", placeId);
+      url.searchParams.set("key", GMAPS_KEY);
+      url.searchParams.set("fields", "geometry,formatted_address");
+      const r = await fetch(url);
+      const data = (await r.json()) as any;
+      const loc = data.result?.geometry?.location;
+      return c.json(
+        {
+          lat: loc?.lat ?? null,
+          lng: loc?.lng ?? null,
+          address: data.result?.formatted_address ?? "",
+          provider: "google",
+        },
+        200,
+      );
+    }
+    return c.json({ message: "No geocoder configured" }, 500);
+  })
+  // ---- form schema (no auth) ----
+  .get("/:companyId/:slug", async (c) => {
+    const companyId = c.req.param("companyId");
+    const slug = c.req.param("slug");
+    const form = await loadForm(companyId, slug);
+    if (!form || !form.active) return c.json({ message: "Form not found" }, 404);
+
+    const t = tdb(companyId);
+    // company display name for the header
+    const [company] = await db
+      .select()
+      .from(schema.companies)
+      .where(eq(schema.companies.id, companyId))
+      .limit(1);
+    // active services for the "service type" dropdown
+    const services = (await t.select(schema.services, eq(schema.services.active, true)))
+      .map((s) => ({ id: s.id, name: s.name, category: s.category }));
+
+    // include the public key prefix so the browser can submit (the page reads it)
+    let publicKey = "";
+    if (form.publicKeyId) {
+      const [k] = await db
+        .select()
+        .from(schema.apiKeys)
+        .where(eq(schema.apiKeys.id, form.publicKeyId))
+        .limit(1);
+      // NOTE: we cannot return the raw key (it's hashed). The page submits using
+      // the key embedded at build/share time; here we only confirm one is bound.
+      if (k && k.keyType === "public" && !k.revokedAt) publicKey = k.prefix;
+    }
+
+    return c.json({
+      form: {
+        title: form.title,
+        intro: form.intro,
+        fields: JSON.parse(form.fields || "[]"),
+        sections: JSON.parse(form.sections || "[]"),
+        brandColor: form.brandColor,
+        logoUrl: form.logoUrl,
+        successMessage: form.successMessage,
+        companyName: company?.name || form.title,
+        hasPublicKey: !!publicKey,
+      },
+      services,
+    }, 200);
+  })
+
+  // ---- submit (public key required) ----
+  .post("/:companyId/:slug/submit", submitLimiter, async (c) => {
+    const companyId = c.req.param("companyId");
+    const slug = c.req.param("slug");
+    const form = await loadForm(companyId, slug);
+    if (!form || !form.active) return c.json({ message: "Form not found" }, 404);
+
+    // ---- authenticate the publishable key ----
+    const rawKey =
+      c.req.header("x-public-key") ||
+      c.req.header("X-Public-Key") ||
+      "";
+    const pub = await resolvePublicKey(rawKey);
+    if (!pub) return c.json({ message: "Invalid or missing public key" }, 401);
+    if (pub.companyId !== companyId)
+      return c.json({ message: "Key does not belong to this tenant" }, 403);
+    // if the form binds a specific key, enforce it
+    if (form.publicKeyId && form.publicKeyId !== pub.id)
+      return c.json({ message: "Key not authorized for this form" }, 403);
+
+    // ---- origin allow-list (if configured on the key) ----
+    const origin = c.req.header("origin") || c.req.header("referer") || "";
+    if (pub.allowedOrigins.length) {
+      const ok = pub.allowedOrigins.some((o) => origin.startsWith(o));
+      if (!ok) return c.json({ message: "Origin not allowed" }, 403);
+    }
+
+    // ---- parse body (multipart for optional photo, else JSON) ----
+    const ct = c.req.header("content-type") || "";
+    let body: Record<string, any> = {};
+    let photoFile: File | null = null;
+    if (ct.includes("multipart/form-data")) {
+      const fd = await c.req.formData();
+      for (const [k, v] of fd.entries()) {
+        if (v instanceof File) { if (k === "photo") photoFile = v; }
+        else body[k] = v;
+      }
+    } else {
+      body = await c.req.json().catch(() => ({}));
+    }
+
+    const name = String(body.name || "").trim();
+    const email = String(body.email || "").trim().toLowerCase();
+    const phone = String(body.phone || "").trim();
+    const address = String(body.address || "").trim();
+    const notes = String(body.notes || "").trim();
+    const serviceId = String(body.serviceId || body.serviceType || "").trim();
+    const preferredAt = body.preferredAt ? new Date(String(body.preferredAt)) : null;
+
+    // ---- field config (rich) ----
+    type RF = {
+      id?: string; key: string; type?: string; enabled?: boolean; required?: boolean;
+      label?: string; core?: boolean;
+    };
+    const fields = JSON.parse(form.fields || "[]") as RF[];
+    const CORE_KEYS = new Set(["name", "email", "phone", "address", "notes", "serviceType", "preferredAt", "photo"]);
+    const coreVal: Record<string, string> = { name, email, phone, address, notes };
+
+    // ---- collect CUSTOM field answers (anything not a core key) ----
+    const customAnswers: Array<{ label: string; key: string; value: string }> = [];
+    for (const f of fields) {
+      if (!f.enabled) continue;
+      if (CORE_KEYS.has(f.key)) continue;
+      const raw = body[f.key];
+      const value = Array.isArray(raw) ? raw.join(", ") : (raw == null ? "" : String(raw)).trim();
+      customAnswers.push({ label: f.label || f.key, key: f.key, value });
+    }
+
+    // ---- validate required fields per form config ----
+    for (const f of fields) {
+      if (!f.enabled || !f.required) continue;
+      if (f.key === "photo" || f.key === "serviceType" || f.key === "preferredAt") continue;
+      if (CORE_KEYS.has(f.key)) {
+        if (!coreVal[f.key]) return c.json({ message: `${f.label || f.key} is required` }, 400);
+      } else {
+        const ans = customAnswers.find((a) => a.key === f.key);
+        if (!ans?.value) return c.json({ message: `${f.label || f.key} is required` }, 400);
+      }
+    }
+    if (!name) return c.json({ message: "Name is required" }, 400);
+
+    const t = tdb(companyId);
+
+    // ---- resolve a service (picked, form default, or first active) ----
+    let svcId = serviceId || form.defaultServiceId || "";
+    let svc = svcId ? await t.selectOne(schema.services, eq(schema.services.id, svcId)) : undefined;
+    if (!svc) {
+      svc = await t.selectOne(schema.services, eq(schema.services.active, true));
+    }
+    // Safety net: a tenant may publish an intake form before adding any
+    // bookable service. Rather than dead-ending the customer (lead lost), we
+    // auto-provision a generic "General Request" service for this tenant so the
+    // submission always lands as a real booking/lead. Admins can rename, price,
+    // or split it later in Catalog → Services.
+    if (!svc) {
+      const [created] = await db
+        .insert(schema.services)
+        .values({
+          companyId,
+          name: "General Request",
+          category: "general",
+          description: "Auto-created to capture intake form requests. Rename or customize in Catalog → Services.",
+          icon: "clipboard-list",
+          basePrice: 0,
+          durationMins: 60,
+          active: true,
+        })
+        .returning()
+        .catch(() => [] as (typeof schema.services.$inferSelect)[]);
+      svc = created;
+    }
+    if (!svc) return c.json({ message: "We couldn't process your request right now. Please try again shortly." }, 503);
+    svcId = svc.id;
+
+    // ---- find-or-create the customer user (tenant-scoped by email) ----
+    let customer = email
+      ? (await db
+          .select()
+          .from(schema.user)
+          .where(and(eq(schema.user.email, email), eq(schema.user.companyId, companyId)))
+          .limit(1))[0]
+      : undefined;
+    if (!customer) {
+      const uid = crypto.randomUUID();
+      // email must be globally unique on the user table; namespace if missing/clash
+      const safeEmail = email || `lead-${uid.slice(0, 8)}@${companyId}.intake.local`;
+      const ins = await db
+        .insert(schema.user)
+        .values({
+          id: uid,
+          name: name || "Website lead",
+          email: safeEmail,
+          role: "customer",
+          companyId,
+          phone: phone || null,
+          address: address || null,
+        })
+        .returning()
+        .catch(async () => {
+          // email collision across tenants -> create with namespaced email
+          const uid2 = crypto.randomUUID();
+          return db
+            .insert(schema.user)
+            .values({
+              id: uid2,
+              name: name || "Website lead",
+              email: `lead-${uid2.slice(0, 8)}+${companyId}@intake.local`,
+              role: "customer",
+              companyId,
+              phone: phone || null,
+              address: address || null,
+            })
+            .returning();
+        });
+      customer = ins[0];
+    }
+
+    // ---- optional photo upload ----
+    let photoUrl = "";
+    if (photoFile && photoFile.size > 0 && photoFile.size <= 15 * 1024 * 1024) {
+      const ext = (photoFile.name.split(".").pop() || "jpg").toLowerCase().slice(0, 8);
+      const key = `intake/${companyId}/${crypto.randomUUID()}.${ext}`;
+      const buf = Buffer.from(await photoFile.arrayBuffer());
+      const stored = await putObject(key, buf, photoFile.type || "image/jpeg");
+      photoUrl = stored.url;
+    }
+
+    // ---- create the pending lead booking ----
+    const scheduledAt = preferredAt && !isNaN(preferredAt.getTime()) ? preferredAt : new Date(Date.now() + 86400_000);
+    const customNotes = customAnswers.filter((a) => a.value).map((a) => `${a.label}: ${a.value}`).join("\n");
+    const composedNotes = [notes, customNotes, photoUrl ? `Photo: ${photoUrl}` : ""].filter(Boolean).join("\n");
+    const [booking] = await t.insert(schema.bookings, {
+      customerId: customer.id,
+      serviceId: svcId,
+      title: svc.name,
+      priority: "normal",
+      status: "pending", // lands in the pipeline as a new lead
+      scheduledAt,
+      address: address || "(no address provided)",
+      notes: composedNotes,
+      customerPhone: phone || "",
+      fieldData: JSON.stringify({
+        source: "intake_form",
+        formSlug: slug,
+        preferredAt: preferredAt ? preferredAt.toISOString() : null,
+        photoUrl: photoUrl || null,
+        custom: customAnswers.reduce<Record<string, string>>((acc, a) => { acc[a.key] = a.value; return acc; }, {}),
+      }),
+      price: svc.basePrice,
+    });
+
+    // ---- audit submission + bump count ----
+    await t.insert(schema.intakeSubmissions, {
+      formId: form.id,
+      bookingId: booking.id,
+      payload: JSON.stringify({ name, email, phone, address, notes, serviceId: svcId, preferredAt, photoUrl, custom: customAnswers }),
+      ipHash: (await hashApiKey(clientIp(c))).slice(0, 16),
+      origin,
+    });
+    await t.update(
+      schema.intakeForms,
+      { submitCount: (form.submitCount || 0) + 1 },
+      eq(schema.intakeForms.id, form.id),
+    );
+
+    // ---- notify the tenant (configurable dispatch) ----
+    fireEvent("created", booking.id).catch(() => {});
+
+    // ---- email the form's designated recipient (master "where it's sent") ----
+    if (form.recipientEmail) {
+      notifyRecipient(form, {
+        name, email, phone, address, notes, service: svc.name,
+        preferredAt: preferredAt ? preferredAt.toLocaleString() : "",
+        photoUrl, custom: customAnswers,
+      }).catch((e) => console.error("intake recipient email failed", e));
+    }
+
+    return c.json({ ok: true, message: form.successMessage }, 201);
+  });
+
+/** Email the configured recipient a clean summary of an intake submission. */
+async function notifyRecipient(
+  form: typeof schema.intakeForms.$inferSelect,
+  d: {
+    name: string; email: string; phone: string; address: string; notes: string;
+    service: string; preferredAt: string; photoUrl: string;
+    custom: Array<{ label: string; value: string }>;
+  },
+) {
+  const esc = (s: string) => String(s || "").replace(/[<>&]/g, (m) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[m]!));
+  const rows: Array<[string, string]> = [
+    ["Name", d.name],
+    ["Email", d.email],
+    ["Phone", d.phone],
+    ["Address", d.address],
+    ["Service", d.service],
+    ["Preferred date", d.preferredAt],
+    ["Notes", d.notes],
+    ...d.custom.filter((c) => c.value).map((c) => [c.label, c.value] as [string, string]),
+  ].filter(([, v]) => v);
+  if (d.photoUrl) rows.push(["Photo", `<a href="${esc(d.photoUrl)}">${esc(d.photoUrl)}</a>`]);
+
+  const brand = form.brandColor || "#06b6d4";
+  const tableRows = rows
+    .map(
+      ([k, v], i) =>
+        `<tr style="background:${i % 2 ? "#f8fafc" : "#ffffff"}"><td style="padding:10px 14px;font-weight:600;color:#475569;white-space:nowrap;vertical-align:top">${esc(k)}</td><td style="padding:10px 14px;color:#0f172a">${k === "Photo" ? v : esc(v)}</td></tr>`,
+    )
+    .join("");
+  const html = `
+  <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto">
+    <div style="background:${brand};color:#fff;padding:18px 22px;border-radius:12px 12px 0 0">
+      <div style="font-size:13px;opacity:.85">New intake submission</div>
+      <div style="font-size:20px;font-weight:700">${esc(form.title)}</div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-top:0;border-radius:0 0 12px 12px;overflow:hidden">${tableRows}</table>
+    <p style="color:#94a3b8;font-size:12px;margin-top:14px">A pending lead was also created in your pipeline.</p>
+  </div>`;
+
+  const { sendEmail } = await import("../../services/email");
+  await sendEmail({
+    to: form.recipientName ? `${form.recipientName} <${form.recipientEmail}>` : form.recipientEmail,
+    subject: `New ${form.title} submission${d.name ? ` from ${d.name}` : ""}`,
+    html,
+    replyTo: d.email || undefined,
+  });
+}

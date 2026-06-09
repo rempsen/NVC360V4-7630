@@ -1,0 +1,86 @@
+{
+  "expo": {
+    "icon": "./assets/icon.png",
+    "android": {
+      "package": "com.nvc360.uberize",
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_LOCATION",
+        "POST_NOTIFICATIONS",
+        "CAMERA",
+        "READ_MEDIA_IMAGES"
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#070b12"
+      },
+      "edgeToEdgeEnabled": true
+    },
+    "extra": {
+      "apiUrl": "https://uberize.ai",
+      "applicationId": "07f7x7sy6bwhugp1bgvuj"
+    },
+    "ios": {
+      "bundleIdentifier": "com.nvc360.uberize",
+      "appleTeamId": "86S82A9ZPS",
+      "supportsTablet": true,
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "location",
+          "remote-notification"
+        ],
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "NVC360 shares your live location with dispatch while you are on shift so customers can be given accurate ETAs.",
+        "NSLocationWhenInUseUsageDescription": "NVC360 shares your live location with dispatch during active jobs."
+      },
+      "entitlements": {
+        "aps-environment": "production"
+      }
+    },
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "cover",
+      "backgroundColor": "#070b12"
+    },
+    "name": "NVC360 Driver",
+    "slug": "homeserve",
+    "version": "1.0.1",
+    "scheme": "homeserve",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "newArchEnabled": false,
+    "web": {
+      "favicon": "./assets/favicon.png",
+      "bundler": "metro"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Allow NVC360 to share your live location with dispatch while you are on shift.",
+          "locationWhenInUsePermission": "Allow NVC360 to share your live location during active jobs.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "color": "#0ea5e9"
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow NVC360 to access your photos to upload job and profile images.",
+          "cameraPermission": "Allow NVC360 to use the camera to capture job photos."
+        }
+      ],
+      "expo-secure-store"
+    ]
+  }
+}

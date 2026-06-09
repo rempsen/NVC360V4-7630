@@ -1,0 +1,236 @@
+import { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "../../lib/api";
+import { FullLoader } from "../../components/loader";
+import { PageWrap } from "../../components/brand";
+import { PageHead } from "./shell";
+import {
+  Sparkles,
+  Zap,
+  Plus,
+  Trash2,
+  Bot,
+  ArrowRight,
+  X,
+} from "lucide-react";
+
+const TRIGGERS = [
+  "work_order_created",
+  "status_changed",
+  "technician_enroute",
+  "job_completed",
+  "sla_breach",
+];
+const ACTIONS = [
+  "auto_assign_nearest",
+  "send_sms",
+  "send_email",
+  "notify_dispatcher",
+  "create_invoice",
+];
+
+const labelize = (s: string) =>
+  s.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+
+export default function AutomationPage() {
+  const qc = useQueryClient();
+  const [showNew, setShowNew] = useState(false);
+  const [form, setForm] = useState({
+    name: "",
+    trigger: TRIGGERS[0],
+    action: ACTIONS[0],
+    description: "",
+  });
+
+  const rules = useQuery({
+    queryKey: ["automation"],
+    queryFn: async () => (await api.automation.$get()).json(),
+  });
+
+  const create = useMutation({
+    mutationFn: async () =>
+      (await api.automation.$post({ json: { ...form, enabled: true } })).json(),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["automation"] });
+      setShowNew(false);
+      setForm({ name: "", trigger: TRIGGERS[0], action: ACTIONS[0], description: "" });
+    },
+  });
+
+  const toggle = useMutation({
+    mutationFn: async ({ id, enabled }: { id: string; enabled: boolean }) =>
+      (await api.automation[":id"].$patch({ param: { id }, json: { enabled } })).json(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["automation"] }),
+  });
+
+  const del = useMutation({
+    mutationFn: async (id: string) =>
+      (await api.automation[":id"].$delete({ param: { id } })).json(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["automation"] }),
+  });
+
+  if (rules.isLoading) return <FullLoader label="Loading automations…" />;
+  const list = rules.data?.rules ?? [];
+
+  return (
+    <PageWrap>
+      <PageHead
+        title="Automation & AI"
+        subtitle="No-code rules that run your operation on autopilot"
+        actions={
+          <button
+            onClick={() => setShowNew(true)}
+            className="flex items-center gap-2 rounded-xl bg-brand px-4 py-2.5 text-sm font-semibold text-white hover:bg-brand-deep"
+          >
+            <Plus className="h-4 w-4" /> New rule
+          </button>
+        }
+      />
+
+      {/* AI capabilities banner */}
+      <div className="mb-6 grid gap-3 sm:grid-cols-2">
+        <div className="nvc-card flex items-start gap-3 border-brand/20 bg-brand/5 p-4">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand/15 text-cyan-glow">
+            <Bot className="h-5 w-5" />
+          </span>
+          <div>
+            <p className="font-semibold text-white">AI Smart Dispatch</p>
+            <p className="text-sm text-slate-400">
+              Ranks technicians by distance, skill match and availability the
+              moment a job lands.
+            </p>
+          </div>
+        </div>
+        <div className="nvc-card flex items-start gap-3 border-emerald-live/20 bg-emerald-live/5 p-4">
+          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-emerald-live/15 text-emerald-live">
+            <Sparkles className="h-5 w-5" />
+          </span>
+          <div>
+            <p className="font-semibold text-white">Route Optimization</p>
+            <p className="text-sm text-slate-400">
+              Re-sequences each tech's stops to cut drive time and fuel.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-2.5">
+        {list.map((r) => (
+          <div
+            key={r.id}
+            className="nvc-card flex items-center gap-4 p-4"
+          >
+            <span
+              className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${
+                r.enabled
+                  ? "bg-emerald-live/15 text-emerald-live"
+                  : "bg-white/5 text-slate-600"
+              }`}
+            >
+              <Zap className="h-5 w-5" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="font-semibold text-white">{r.name}</p>
+              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
+                <span className="rounded-md bg-amber-warn/10 px-2 py-0.5 font-medium text-amber-warn">
+                  {labelize(r.trigger)}
+                </span>
+                <ArrowRight className="h-3 w-3 text-slate-600" />
+                <span className="rounded-md bg-brand/10 px-2 py-0.5 font-medium text-cyan-glow">
+                  {labelize(r.action)}
+                </span>
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label={r.enabled ? "Disable automation" : "Enable automation"}
+              onClick={() => toggle.mutate({ id: r.id, enabled: !r.enabled })}
+              className={`relative h-6 w-11 shrink-0 rounded-full transition ${
+                r.enabled ? "bg-emerald-live" : "bg-white/10"
+              }`}
+            >
+              <span
+                className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-all ${
+                  r.enabled ? "left-[22px]" : "left-0.5"
+                }`}
+              />
+            </button>
+            <button
+              onClick={() => del.mutate(r.id)}
+              className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-slate-500 hover:bg-red-500/10 hover:text-red-400"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          </div>
+        ))}
+        {list.length === 0 && (
+          <p className="py-12 text-center text-sm text-slate-500">
+            No automation rules yet
+          </p>
+        )}
+      </div>
+
+      {/* new rule modal */}
+      {showNew && (
+        <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-md rounded-2xl border border-white/10 bg-ink-2 p-5 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="font-display text-lg font-bold text-white">
+                New automation rule
+              </h3>
+              <button
+                onClick={() => setShowNew(false)}
+                className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 hover:bg-white/5 hover:text-white"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-3">
+              <input aria-label="Rule name"
+                value={form.name}
+                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                placeholder="Rule name"
+                className="w-full rounded-lg border border-white/10 bg-ink-3/60 px-3 py-2 text-sm text-white placeholder:text-slate-600 focus:border-brand focus:outline-none"
+              />
+              <div>
+                <span className="mb-1 block text-xs text-slate-500">When (trigger)</span>
+                <select aria-label="When (trigger)"
+                  value={form.trigger}
+                  onChange={(e) => setForm({ ...form, trigger: e.target.value })}
+                  className="w-full rounded-lg border border-white/10 bg-ink-3/60 px-3 py-2 text-sm text-white focus:border-brand focus:outline-none"
+                >
+                  {TRIGGERS.map((t) => (
+                    <option key={t} value={t}>
+                      {labelize(t)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <span className="mb-1 block text-xs text-slate-500">Then (action)</span>
+                <select aria-label="Then (action)"
+                  value={form.action}
+                  onChange={(e) => setForm({ ...form, action: e.target.value })}
+                  className="w-full rounded-lg border border-white/10 bg-ink-3/60 px-3 py-2 text-sm text-white focus:border-brand focus:outline-none"
+                >
+                  {ACTIONS.map((a) => (
+                    <option key={a} value={a}>
+                      {labelize(a)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button
+                disabled={!form.name || create.isPending}
+                onClick={() => create.mutate()}
+                className="w-full rounded-lg bg-brand py-2.5 text-sm font-semibold text-white hover:bg-brand-deep disabled:opacity-50"
+              >
+                {create.isPending ? "Creating…" : "Create rule"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </PageWrap>
+  );
+}

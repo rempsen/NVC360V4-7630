@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Typecheck (web — the hardened surface; gates the build)
+        working-directory: packages/web
+        run: bunx tsc --noEmit
+
+      - name: Typecheck (mobile + desktop — non-blocking backlog)
+        run: bun run typecheck
+        continue-on-error: true
+
+      - name: Lint (blocking — a11y/hooks backlog burned down to zero)
+        run: bun run lint
+
+      - name: Unit tests
+        working-directory: packages/web
+        run: bun test src/shared/__tests__ src/api/lib/__tests__ src/api/routes/__tests__ src/services/__tests__
+
+      - name: Migration dry-run (schema must compile to valid SQL)
+        working-directory: packages/web
+        env:
+          # `generate` does not open a connection; placeholders satisfy the loader.
+          DATABASE_URL: "libsql://placeholder.invalid"
+          DATABASE_AUTH_TOKEN: "placeholder"
+        run: |
+          # This repo deploys schema via `db:push`, so migrations are not committed.
+          # We still gate on the schema being able to produce valid SQL — a syntax
+          # or relation error here means the schema is broken before it ships.
+          bunx drizzle-kit generate --name ci_dryrun
+          rm -rf drizzle  # discard the throwaway artifact; push-based deploy

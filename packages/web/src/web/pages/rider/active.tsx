@@ -1,0 +1,226 @@
+import { useParams, Link, useLocation } from "wouter";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
+import { api } from "../../lib/api";
+import { LiveMap } from "../../components/live-map";
+import { StatusBadge } from "../../components/brand";
+import { FullLoader, Loader } from "../../components/loader";
+import { fmtDate } from "../../lib/utils";
+import {
+  ArrowLeft, MapPin, Phone, Navigation, CheckCircle2, Play, Flag, Radio, Check, X,
+} from "lucide-react";
+
+// status flow buttons for the rider
+const FLOW: Record<string, { next: string; label: string; icon: any }> = {
+  assigned: { next: "enroute", label: "Start driving", icon: Play },
+  enroute: { next: "arrived", label: "I've arrived", icon: Flag },
+  arrived: { next: "in_progress", label: "Begin service", icon: Play },
+  in_progress: { next: "completed", label: "Complete job", icon: CheckCircle2 },
+};
+
+export default function RiderActive() {
+  const { id } = useParams<{ id: string }>();
+  const [, navigate] = useLocation();
+  const qc = useQueryClient();
+  const [sharing, setSharing] = useState(false);
+  const [pos, setPos] = useState<{ lat: number; lng: number } | null>(null);
+  const watchRef = useRef<number | null>(null);
+  const simRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const booking = useQuery({
+    queryKey: ["booking", id],
+    queryFn: async () => (await api.bookings[":id"].$get({ param: { id } })).json(),
+    refetchInterval: 6000,
+  });
+
+  const ping = useMutation({
+    mutationFn: async (p: { lat: number; lng: number }) => {
+      await api.tracking[":bookingId"].ping.$post({ param: { bookingId: id }, json: p });
+    },
+  });
+
+  const setStatus = useMutation({
+    mutationFn: async (status: string) => {
+      await api.bookings[":id"].status.$post({ param: { id }, json: { status } });
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["booking", id] });
+      qc.invalidateQueries({ queryKey: ["bookings"] });
+    },
+  });
+
+  const accept = useMutation({
+    mutationFn: async () => { await api.bookings[":id"].accept.$post({ param: { id } }); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["booking", id] }); qc.invalidateQueries({ queryKey: ["bookings"] }); },
+  });
+  const decline = useMutation({
+    mutationFn: async (reason: string) => { await api.bookings[":id"].decline.$post({ param: { id }, json: { reason } }); },
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["bookings"] }); navigate("/rider"); },
+  });
+
+  const b = (booking.data as any)?.booking;
+
+  // start/stop GPS sharing
+  function startSharing() {
+    if (!b) return;
+    setSharing(true);
+    const dest = { lat: b.lat, lng: b.lng };
+
+    if ("geolocation" in navigator) {
+      watchRef.current = navigator.geolocation.watchPosition(
+        (geo) => {
+          const p = { lat: geo.coords.latitude, lng: geo.coords.longitude };
+          setPos(p);
+          ping.mutate(p);
+        },
+        () => startSimulation(dest),
+        { enableHighAccuracy: true, maximumAge: 3000, timeout: 8000 },
+      );
+    } else {
+      startSimulation(dest);
+    }
+  }
+
+  // simulated movement toward destination (demo / GPS-denied fallback)
+  function startSimulation(dest: { lat: number; lng: number }) {
+    let cur = pos ??
+      (b?.rider?.lat ? { lat: b.rider.lat, lng: b.rider.lng } : { lat: dest.lat + 0.02, lng: dest.lng - 0.02 });
+    setPos(cur);
+    ping.mutate(cur);
+    simRef.current = setInterval(() => {
+      cur = {
+        lat: cur.lat + (dest.lat - cur.lat) * 0.18,
+        lng: cur.lng + (dest.lng - cur.lng) * 0.18,
+      };
+      setPos({ ...cur });
+      ping.mutate({ ...cur });
+    }, 3000);
+  }
+
+  function stopSharing() {
+    setSharing(false);
+    if (watchRef.current != null) navigator.geolocation.clearWatch(watchRef.current);
+    if (simRef.current) clearInterval(simRef.current);
+    watchRef.current = null;
+    simRef.current = null;
+  }
+
+  useEffect(() => () => stopSharing(), []);
+
+  // auto-stop sharing when completed
+  useEffect(() => {
+    if (b?.status === "completed" && sharing) stopSharing();
+  }, [b?.status, sharing]);
+
+  if (booking.isLoading) return <FullLoader label="Loading job…" />;
+  if (!b) return <p>Job not found.</p>;
+  const isOffered = b.status === "assigned" && b.assignStatus === "offered";
+  const step = isOffered ? null : FLOW[b.status];
+  
+
+  return (
+    <div className="mx-auto max-w-4xl">
+      <Link to="/rider" className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-cyan-glow">
+        <ArrowLeft className="h-4 w-4" /> All jobs
+      </Link>
+
+      <div className="grid gap-6 lg:grid-cols-[1fr_320px]">
+        <div className="space-y-4">
+          <div className="overflow-hidden rounded-2xl border border-white/5 nvc-card">
+            <div className="relative">
+              <LiveMap rider={pos ?? (b.rider?.lat ? { lat: b.rider.lat, lng: b.rider.lng } : null)} destination={{ lat: b.lat, lng: b.lng }} className="h-[320px] w-full" />
+              <div className="absolute left-3 top-3 z-[400]"><StatusBadge status={b.status} /></div>
+              {sharing && (
+                <div className="absolute right-3 top-3 z-[400] flex items-center gap-1.5 rounded-full bg-sky-accent px-3 py-1.5 text-xs font-bold text-white shadow">
+                  <Radio className="h-3.5 w-3.5 animate-pulse" /> Sharing live
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* live location toggle */}
+          {b.status !== "completed" && b.status !== "cancelled" && (
+            <div className="flex items-center justify-between rounded-2xl border border-white/5 bg-ink-2 p-4 shadow-sm">
+              <div className="flex items-center gap-3">
+                <div className={`grid h-11 w-11 place-items-center rounded-xl ${sharing ? "bg-sky-accent text-white" : "bg-white/5 text-slate-500"}`}>
+                  <Navigation className="h-5 w-5" />
+                </div>
+                <div>
+                  <div className="font-bold text-white">Live location</div>
+                  <div className="text-xs text-slate-500">{sharing ? "Customer can see you on the map" : "Share so the customer can track you"}</div>
+                </div>
+              </div>
+              <button
+                onClick={sharing ? stopSharing : startSharing}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${sharing ? "bg-red-500/100/10 text-red-400 hover:bg-red-500/100/20" : "bg-brand text-white shadow-lg shadow-brand/30 hover:bg-brand-deep"}`}
+              >
+                {sharing ? "Stop" : "Share"}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* job details + action */}
+        <div className="space-y-4 lg:sticky lg:top-20 lg:self-start">
+          <div className="rounded-2xl border border-white/5 bg-ink-2 p-5 shadow-sm">
+            <h3 className="font-bold text-white">{b.service?.name}</h3>
+            <div className="mt-3 space-y-2.5 text-sm text-slate-600">
+              <div className="flex items-start gap-2"><MapPin className="mt-0.5 h-4 w-4 text-slate-500" />{b.address}</div>
+              <div className="flex items-start gap-2"><CheckCircle2 className="mt-0.5 h-4 w-4 text-slate-500" />{fmtDate(b.scheduledAt)}</div>
+            </div>
+            {b.notes && <p className="mt-3 rounded-lg bg-ink p-3 text-xs text-slate-600">📝 {b.notes}</p>}
+          </div>
+
+          {b.customer && (
+            <div className="flex items-center justify-between rounded-2xl border border-white/5 bg-ink-2 p-4 shadow-sm">
+              <div>
+                <div className="text-xs text-slate-500">Customer</div>
+                <div className="font-bold text-white">{b.customer.name}</div>
+              </div>
+              {b.customer.phone && (
+                <a href={`tel:${b.customer.phone}`} className="grid h-11 w-11 place-items-center rounded-full bg-green-500 text-white shadow-lg shadow-green-500/30">
+                  <Phone className="h-5 w-5" />
+                </a>
+              )}
+            </div>
+          )}
+
+          {isOffered ? (
+            <div className="space-y-2.5 rounded-2xl border border-amber-400/30 bg-amber-400/5 p-4">
+              <div className="text-center text-sm font-bold text-amber-300">New job offer — respond to continue</div>
+              <button
+                disabled={accept.isPending}
+                onClick={() => accept.mutate()}
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-green-500 py-3.5 text-base font-bold text-white shadow-lg shadow-green-500/30 transition hover:bg-green-600 disabled:opacity-60"
+              >
+                {accept.isPending ? <Loader className="h-5 w-5 border-white/40 border-t-white" /> : <><Check className="h-5 w-5" /> Accept job</>}
+              </button>
+              <button
+                disabled={decline.isPending}
+                onClick={() => { const r = window.prompt("Reason for declining (optional):") ?? ""; decline.mutate(r); }}
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-ink py-3 text-sm font-bold text-slate-300 transition hover:border-red-500/40 hover:text-red-400 disabled:opacity-60"
+              >
+                <X className="h-4 w-4" /> Decline
+              </button>
+            </div>
+          ) : step ? (
+            <button
+              disabled={setStatus.isPending}
+              onClick={() => {
+                if (step.next === "enroute" && !sharing) startSharing();
+                setStatus.mutate(step.next);
+              }}
+              className="flex w-full items-center justify-center gap-2 rounded-xl bg-brand py-4 text-base font-bold text-white shadow-lg shadow-brand/30 transition hover:bg-brand-deep disabled:opacity-60"
+            >
+              {setStatus.isPending ? <Loader className="h-5 w-5 border-white/40 border-t-white" /> : <><step.icon className="h-5 w-5" />{step.label}</>}
+            </button>
+          ) : (
+            <div className="flex items-center justify-center gap-2 rounded-xl bg-green-50 py-4 font-bold text-green-600">
+              <CheckCircle2 className="h-5 w-5" /> Job completed
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

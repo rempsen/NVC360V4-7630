@@ -1,0 +1,418 @@
+import { useState, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api } from "../../lib/api";
+import { FullLoader } from "../../components/loader";
+import { PageWrap } from "../../components/brand";
+import { PageHead } from "./shell";
+import { Field, inputCls, BtnPrimary } from "../../components/modal";
+import { AddressAutocomplete } from "../../components/address-autocomplete";
+import { Save, Building2, Check, Calendar, Copy, RefreshCw, ExternalLink, MapPin, Sparkles, Plug, KeyRound, ScrollText, Lock, Eye, EyeOff } from "lucide-react";
+import { useWorkerNoun } from "../../lib/use-brand";
+import { cn } from "../../lib/utils";
+import AutomationPage from "./automation";
+import IntegrationsPage from "./integrations";
+import ApiAccessPage from "./api-access";
+import AuditPage from "./audit";
+
+const TIMEZONES = [
+  "America/Winnipeg", "America/Toronto", "America/Vancouver", "America/Edmonton",
+  "America/Halifax", "America/St_Johns", "America/New_York", "America/Chicago",
+  "America/Denver", "America/Los_Angeles",
+];
+const CURRENCIES = ["CAD", "USD", "EUR", "GBP", "AUD"];
+
+function CalendarSync() {
+  const qc = useQueryClient();
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const feed = useQuery({
+    queryKey: ["calendar-feed"],
+    queryFn: async () => (await (api as any).calendar.feed.$get()).json(),
+  });
+
+  const regen = useMutation({
+    mutationFn: async () => (await (api as any).calendar.feed.regenerate.$post()).json(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["calendar-feed"] }),
+  });
+
+  const copy = (val: string, key: string) => {
+    navigator.clipboard?.writeText(val);
+    setCopied(key);
+    setTimeout(() => setCopied((k) => (k === key ? null : k)), 1800);
+  };
+
+  const d = feed.data as any;
+
+  return (
+    <div className="nvc-card space-y-4 p-5">
+      <div className="flex items-start justify-between gap-3">
+        <h3 className="flex items-center gap-2 font-bold text-white">
+          <Calendar className="h-4 w-4 text-brand" /> Calendar Sync
+        </h3>
+        <button
+          onClick={() => {
+            if (confirm("Regenerate your calendar link? Existing subscriptions will stop updating until re-added.")) regen.mutate();
+          }}
+          disabled={regen.isPending}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-medium text-white/70 transition hover:bg-white/5 disabled:opacity-50"
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${regen.isPending ? "animate-spin" : ""}`} /> Regenerate
+        </button>
+      </div>
+      <p className="text-xs text-white/50">
+        Subscribe to keep every job synced to your calendar app. Updates refresh automatically (~30 min). This is a read-only feed of all dispatch jobs.
+      </p>
+
+      {feed.isLoading || !d ? (
+        <div className="h-24 animate-pulse rounded-lg bg-white/5" />
+      ) : (
+        <div className="space-y-3">
+          <Field label="Subscription URL">
+            <div className="flex items-center gap-2">
+              <input aria-label="Webcal" className={inputCls} readOnly value={d.webcal} onFocus={(e) => e.target.select()} />
+              <button
+                onClick={() => copy(d.webcal, "webcal")}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 px-2.5 py-2 text-xs font-medium text-white/80 transition hover:bg-white/5"
+              >
+                {copied === "webcal" ? <Check className="h-3.5 w-3.5 text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
+                {copied === "webcal" ? "Copied" : "Copy"}
+              </button>
+            </div>
+          </Field>
+          <div className="flex flex-wrap gap-2">
+            <a
+              href={d.google}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-white/5 px-3 py-2 text-xs font-medium text-white/90 transition hover:bg-white/10"
+            >
+              <ExternalLink className="h-3.5 w-3.5" /> Add to Google
+            </a>
+            <a
+              href={d.outlook}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-white/5 px-3 py-2 text-xs font-medium text-white/90 transition hover:bg-white/10"
+            >
+              <ExternalLink className="h-3.5 w-3.5" /> Add to Outlook
+            </a>
+            <a
+              href={d.webcal}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-white/5 px-3 py-2 text-xs font-medium text-white/90 transition hover:bg-white/10"
+            >
+              <Calendar className="h-3.5 w-3.5" /> Apple Calendar
+            </a>
+          </div>
+          <p className="text-[11px] text-white/40">
+            Apple Calendar: the “Apple Calendar” button opens the <code className="text-white/60">webcal://</code> link directly. For Google/Outlook, use the buttons above.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompanySettingsTab() {
+  const qc = useQueryClient();
+  const { noun } = useWorkerNoun();
+  const [form, setForm] = useState<any>(null);
+  const [saved, setSaved] = useState(false);
+
+  const settings = useQuery({
+    queryKey: ["settings"],
+    queryFn: async () => (await api.settings.$get()).json(),
+  });
+
+  useEffect(() => {
+    if (settings.data) setForm((settings.data as any).settings);
+  }, [settings.data]);
+
+  const save = useMutation({
+    mutationFn: async () => {
+      const res = await api.settings.$put({ json: form });
+      if (!res.ok) throw new Error("Save failed");
+      return res.json();
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["settings"] });
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    },
+  });
+
+  if (settings.isLoading || !form) return <FullLoader label="Loading settings…" />;
+  const set = (k: string, v: any) => setForm((f: any) => ({ ...f, [k]: v }));
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-bold text-white">Company</h2>
+          <p className="text-sm text-white/50">Business profile, branding, tax &amp; locale</p>
+        </div>
+        <BtnPrimary disabled={save.isPending} onClick={() => save.mutate()}>
+          {saved ? <Check className="h-4 w-4" /> : <Save className="h-4 w-4" />}
+          {saved ? "Saved" : save.isPending ? "Saving…" : "Save changes"}
+        </BtnPrimary>
+      </div>
+
+      <div className="grid gap-5 lg:grid-cols-3 lg:items-start">
+        {/* Business profile + geofencing (left, 2-wide) */}
+        <div className="space-y-5 lg:col-span-2">
+        <div className="nvc-card space-y-4 p-5">
+          <h3 className="flex items-center gap-2 font-bold text-white">
+            <Building2 className="h-4 w-4 text-brand" /> Business Profile
+          </h3>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Company name">
+              <input aria-label="Name" className={inputCls} value={form.name} onChange={(e) => set("name", e.target.value)} />
+            </Field>
+            <Field label="Legal name">
+              <input aria-label="Legal Name" className={inputCls} value={form.legalName} onChange={(e) => set("legalName", e.target.value)} />
+            </Field>
+            <Field label="Email">
+              <input aria-label="Email" className={inputCls} type="email" value={form.email} onChange={(e) => set("email", e.target.value)} />
+            </Field>
+            <Field label="Phone">
+              <input aria-label="Phone" className={inputCls} value={form.phone} onChange={(e) => set("phone", e.target.value)} />
+            </Field>
+            <Field label="Website">
+              <input aria-label="Website" className={inputCls} value={form.website} onChange={(e) => set("website", e.target.value)} />
+            </Field>
+            <Field label="Business address" hint="Autocompletes & geocodes for dispatch & geofencing">
+              <AddressAutocomplete
+                value={form.address}
+                onResolve={({ address, lat, lng }) =>
+                  setForm((f: any) => ({ ...f, address, ...(lat != null && { lat, lng }) }))
+                }
+              />
+            </Field>
+          </div>
+        </div>
+
+          {/* Geofencing */}
+          <div className="nvc-card space-y-4 p-5">
+            <h3 className="flex items-center gap-2 font-bold text-white">
+              <MapPin className="h-4 w-4 text-brand" /> Geofencing
+            </h3>
+            <p className="text-xs text-white/50">
+              Auto-arrive a {noun.toLowerCase()} and start their on-site clock when they get within this distance of the job address. Leaving the radius pauses the clock automatically.
+            </p>
+            <Field label="Auto-arrive radius (meters)" hint="Default 20 m">
+              <input aria-label="Geofence Radius M"
+                type="number"
+                min={5}
+                step={5}
+                className={inputCls}
+                value={form.geofenceRadiusM ?? 20}
+                onChange={(e) => set("geofenceRadiusM", Math.max(5, parseInt(e.target.value) || 20))}
+              />
+            </Field>
+          </div>
+        </div>
+
+        {/* Calendar + branding + locale (right column) */}
+        <div className="space-y-5">
+          <CalendarSync />
+
+          <div className="nvc-card space-y-4 p-5">
+            <h3 className="font-bold text-white">Branding</h3>
+            <Field label="Brand color">
+              <div className="flex items-center gap-2">
+                <input aria-label="Brand Color"
+                  type="color"
+                  value={form.brandColor}
+                  onChange={(e) => set("brandColor", e.target.value)}
+                  className="h-9 w-12 cursor-pointer rounded border border-white/10 bg-transparent"
+                />
+                <input aria-label="Brand Color" className={inputCls} value={form.brandColor} onChange={(e) => set("brandColor", e.target.value)} />
+              </div>
+            </Field>
+            <Field label="Logo URL">
+              <input aria-label="https://…" className={inputCls} value={form.logo} onChange={(e) => set("logo", e.target.value)} placeholder="https://…" />
+            </Field>
+          </div>
+
+          <div className="nvc-card space-y-4 p-5">
+            <h3 className="font-bold text-white">Tax & Locale</h3>
+            <Field label="Timezone">
+              <select className={inputCls} value={form.timezone} onChange={(e) => set("timezone", e.target.value)}>
+                {TIMEZONES.map((t) => <option key={t}>{t}</option>)}
+              </select>
+            </Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Currency">
+                <select className={inputCls} value={form.currency} onChange={(e) => set("currency", e.target.value)}>
+                  {CURRENCIES.map((c) => <option key={c}>{c}</option>)}
+                </select>
+              </Field>
+              <Field label="Tax label">
+                <input aria-label="Tax Label" className={inputCls} value={form.taxLabel} onChange={(e) => set("taxLabel", e.target.value)} />
+              </Field>
+            </div>
+            <Field label="Tax rate (%)">
+              <input aria-label="Tax Rate" type="number" step="0.1" className={inputCls} value={form.taxRate} onChange={(e) => set("taxRate", parseFloat(e.target.value) || 0)} />
+            </Field>
+          </div>
+
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Self-service password change for the signed-in user. */
+function SecurityTab() {
+  const [cur, setCur] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [show, setShow] = useState(false);
+  const [err, setErr] = useState("");
+  const [done, setDone] = useState(false);
+
+  const change = useMutation({
+    mutationFn: async () => {
+      const res = await (api as any).admin.me["change-password"].$post({
+        json: { currentPassword: cur, newPassword: next },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error((data as any)?.message ?? "Could not change password");
+      return data;
+    },
+    onSuccess: () => {
+      setDone(true);
+      setCur(""); setNext(""); setConfirm("");
+      setTimeout(() => setDone(false), 3000);
+    },
+    onError: (e: any) => setErr(e.message),
+  });
+
+  function submit() {
+    setErr("");
+    if (next.length < 8) return setErr("New password must be at least 8 characters.");
+    if (next !== confirm) return setErr("New passwords do not match.");
+    change.mutate();
+  }
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h2 className="text-lg font-bold text-white">Security</h2>
+        <p className="text-sm text-white/50">Change your account password</p>
+      </div>
+      <div className="nvc-card max-w-lg space-y-4 p-5">
+        <h3 className="flex items-center gap-2 font-bold text-white">
+          <Lock className="h-4 w-4 text-brand" /> Change password
+        </h3>
+        <Field label="Current password">
+          <input aria-label="Current password" type={show ? "text" : "password"} className={inputCls} value={cur} onChange={(e) => setCur(e.target.value)} autoComplete="current-password" />
+        </Field>
+        <Field label="New password" hint="At least 8 characters">
+          <input aria-label="New password" type={show ? "text" : "password"} className={inputCls} value={next} onChange={(e) => setNext(e.target.value)} autoComplete="new-password" />
+        </Field>
+        <Field label="Confirm new password">
+          <input aria-label="Confirm new password" type={show ? "text" : "password"} className={inputCls} value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
+        </Field>
+        <button type="button" onClick={() => setShow((s) => !s)} className="inline-flex items-center gap-1.5 text-xs text-white/60 hover:text-white/90">
+          {show ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+          {show ? "Hide passwords" : "Show passwords"}
+        </button>
+        {err && <p className="text-sm text-rose-400">{err}</p>}
+        {done && <p className="text-sm text-emerald-400">Password updated.</p>}
+        <div>
+          <BtnPrimary disabled={change.isPending} onClick={submit}>
+            {done ? <Check className="h-4 w-4" /> : <Save className="h-4 w-4" />}
+            {change.isPending ? "Updating…" : "Update password"}
+          </BtnPrimary>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type SettingsSection = {
+  key: string;
+  label: string;
+  icon: typeof Building2;
+  render: () => React.ReactNode;
+  /** sub-pages that already render their own PageWrap/PageHead */
+  embedded?: boolean;
+};
+
+const SECTIONS: SettingsSection[] = [
+  { key: "company", label: "Company", icon: Building2, render: () => <CompanySettingsTab /> },
+  { key: "automation", label: "Automation & AI", icon: Sparkles, render: () => <AutomationPage />, embedded: true },
+  { key: "integrations", label: "Integrations", icon: Plug, render: () => <IntegrationsPage />, embedded: true },
+  { key: "api", label: "API & MCP", icon: KeyRound, render: () => <ApiAccessPage />, embedded: true },
+  { key: "audit", label: "Audit Log", icon: ScrollText, render: () => <AuditPage />, embedded: true },
+  { key: "security", label: "Security", icon: Lock, render: () => <SecurityTab /> },
+];
+
+export default function AdminSettings() {
+  // remember last-opened section across reloads
+  const [active, setActive] = useState<string>(() => {
+    if (typeof localStorage === "undefined") return "company";
+    return localStorage.getItem("settings_section") ?? "company";
+  });
+  const section = SECTIONS.find((s) => s.key === active) ?? SECTIONS[0];
+
+  function select(key: string) {
+    setActive(key);
+    try { localStorage.setItem("settings_section", key); } catch { /* ignore */ }
+  }
+
+  const LeftNav = (
+    <nav className="nvc-card flex flex-row gap-1 overflow-x-auto p-2 lg:flex-col lg:overflow-visible">
+      {SECTIONS.map((s) => {
+        const on = s.key === active;
+        return (
+          <button
+            key={s.key}
+            onClick={() => select(s.key)}
+            className={cn(
+              "flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-sm font-medium transition lg:w-full",
+              on
+                ? "bg-brand/15 text-cyan-glow nvc-glow-sm"
+                : "text-slate-400 hover:bg-white/5 hover:text-slate-200",
+            )}
+          >
+            <s.icon className="h-[18px] w-[18px] shrink-0" />
+            <span className="whitespace-nowrap">{s.label}</span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+
+  return (
+    <PageWrap>
+      <PageHead title="Settings" subtitle="Configure your workspace" />
+      <div className="grid gap-5 lg:grid-cols-[220px_1fr] lg:items-start">
+        {LeftNav}
+        <div className="min-w-0">
+          {/* Embedded pages bring their own header/spacing; render bare.
+              Native tabs get a card surface. */}
+          {section.embedded ? (
+            <EmbeddedSection>{section.render()}</EmbeddedSection>
+          ) : (
+            <div className="nvc-card p-5 sm:p-6">{section.render()}</div>
+          )}
+        </div>
+      </div>
+    </PageWrap>
+  );
+}
+
+/**
+ * Embedded sub-pages (Automation, Integrations, API, Audit) were originally
+ * standalone routes that render their own <PageWrap> (max-width + padding) and
+ * <PageHead>. Inside the Settings layout we neutralize that outer wrapper so we
+ * don't double-pad or re-constrain width — the content fills the column.
+ */
+function EmbeddedSection({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="[&_.mx-auto]:mx-0 [&_.mx-auto]:max-w-none [&_.mx-auto]:!px-0 [&_.mx-auto]:!py-0 [&_.mx-auto]:!pb-0">
+      {children}
+    </div>
+  );
+}
