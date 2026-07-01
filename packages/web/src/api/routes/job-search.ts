@@ -6,7 +6,7 @@ import {
 } from "drizzle-orm";
 import { requireAuth, tenantId } from "../middleware/auth";
 import { isAdminRole } from "../lib/permissions";
-import { toCsv, toPdf, buildJobPdf, fileResponse, type JobUnitLine } from "./export";
+import { toCsv, toPdf, buildJobPdf, fileResponse, type JobUnitLine, type JobPhoto } from "./export";
 
 type SessionUser = { id: string; role?: string; email: string; name: string };
 
@@ -158,9 +158,9 @@ async function buildWhere(f: Filters, cid: string): Promise<any[]> {
 /*  Enrichment for export rows                                                */
 /* -------------------------------------------------------------------------- */
 async function enrichRows(rows: (typeof schema.bookings.$inferSelect)[]) {
-  const svcIds = [...new Set(rows.map((r) => r.serviceId))];
+  const svcIds = [...new Set(rows.map((r) => r.serviceId).filter((id): id is string => !!id))];
   const riderIds = [...new Set(rows.map((r) => r.riderId).filter(Boolean) as string[])];
-  const custIds = [...new Set(rows.map((r) => r.customerId))];
+  const custIds = [...new Set(rows.map((r) => r.customerId).filter((id): id is string => !!id))];
 
   const svcMap = new Map<string, any>();
   if (svcIds.length) (await db.select().from(schema.services).where(inArray(schema.services.id, svcIds))).forEach((s) => svcMap.set(s.id, s));
@@ -197,6 +197,8 @@ async function enrichRows(rows: (typeof schema.bookings.$inferSelect)[]) {
       customerEmail: cust?.email ?? "",
       address: b.address,
       region: b.region,
+      lat: b.lat ?? null,
+      lng: b.lng ?? null,
       technician: rider?.name ?? (b.riderId ? "—" : "Unassigned"),
       riderId: b.riderId,
       scheduledAt: b.scheduledAt,
@@ -398,7 +400,15 @@ export const jobSearchRoutes = new Hono()
           }));
       }
     } catch { /* ignore malformed lineItems */ }
-    const buf = await buildJobPdf(rows, unitLines, `Job ${jobNumber(b.id)} — ${enriched.customerName}`, enriched.address);
+
+    // Fetch job photos for the PDF
+    let jobPhotos: JobPhoto[] = [];
+    try {
+      const photoRows = await db.select().from(schema.jobPhotos).where(eq(schema.jobPhotos.bookingId, id));
+      jobPhotos = photoRows.map((p: any) => ({ url: p.url, caption: p.caption ?? "" }));
+    } catch { /* skip photos if query fails */ }
+
+    const buf = await buildJobPdf(rows, unitLines, `Job ${jobNumber(b.id)} — ${enriched.customerName}`, enriched.address, jobPhotos);
     return fileResponse(buf, `nvc360-job-${jobNumber(b.id)}-${stamp}.pdf`, "application/pdf");
   })
 

@@ -50,6 +50,8 @@ export default function SchedulerPage() {
   const [aiFor, setAiFor] = useState<string | null>(null);
   // touch-friendly manual assign (alternative to drag-and-drop)
   const [assignFor, setAssignFor] = useState<string | null>(null);
+  // skill class filter for board view
+  const [skillFilter, setSkillFilter] = useState<string>("");
   const [mode, setMode] = useState<"board" | "calendar">("board");
   const [calView, setCalView] = useState<CalView>("week");
   const [anchor, setAnchor] = useState(() => new Date());
@@ -65,6 +67,12 @@ export default function SchedulerPage() {
     queryKey: ["riders"],
     queryFn: async () => (await api.riders.$get()).json(),
   });
+
+  const skillClassesQ = useQuery({
+    queryKey: ["msg-skill-classes"],
+    queryFn: async () => { const r = await fetch("/api/messages/skill-classes"); return r.json(); },
+  });
+  const boardSkillClasses: string[] = (skillClassesQ.data?.skillClasses ?? []).map((s: any) => s.name);
 
   const assign = useMutation({
     mutationFn: async ({ id, riderId }: { id: string; riderId: string }) =>
@@ -170,7 +178,12 @@ export default function SchedulerPage() {
 
   const all = bookings.data?.bookings ?? [];
   const techs = riders.data?.riders ?? [];
+  // skill-class-filtered techs for board view
+  const filteredTechs = skillFilter ? techs.filter((t: any) => t.skillClass === skillFilter) : techs;
   const unassigned = all.filter((b) => !b.riderId && b.status !== "completed" && b.status !== "cancelled");
+  // dragging job for skill highlight
+  const draggedJob = dragId ? all.find((b) => b.id === dragId) : null;
+  const dragSkillClass = (draggedJob as any)?.requiredSkillClass ?? "";
   // calendar backlog: active jobs that still need scheduling OR a tech assigned.
   // drag one onto a day to (re)set its date, then dispatch from the Board.
   const undated = all.filter(
@@ -708,11 +721,23 @@ export default function SchedulerPage() {
                             {PRIORITY_META[b.priority]?.label}
                           </span>
                         )}
+                        {(b as any).requiredSkillClass && (
+                          <span className="shrink-0 rounded-full bg-brand/20 px-1.5 py-0.5 text-[9px] font-bold text-brand">
+                            {(b as any).requiredSkillClass}
+                          </span>
+                        )}
                       </div>
                       <p className="mt-0.5 flex items-center gap-1 truncate text-xs text-slate-500">
                         <MapPin className="h-3 w-3 shrink-0" />
                         {b.address}
                       </p>
+                      {(b as any).requiredSkills && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {((b as any).requiredSkills as string).split(",").filter(Boolean).map((sk: string) => (
+                            <span key={sk} className="rounded-full bg-cyan-glow/10 px-1.5 py-0.5 text-[9px] font-semibold text-cyan-glow">{sk}</span>
+                          ))}
+                        </div>
+                      )}
                       <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5">
                         <button
                           onClick={(e) => {
@@ -761,36 +786,45 @@ export default function SchedulerPage() {
                             Assign to {noun.toLowerCase()}
                           </p>
                           <div className="max-h-44 space-y-1 overflow-y-auto">
-                            {techs.length === 0 && (
-                              <p className="px-1 py-2 text-xs text-slate-500">
-                                No {nounPlural.toLowerCase()} found.
-                              </p>
-                            )}
-                            {techs.map((t: any) => (
-                              <button
-                                key={t.id}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  assign.mutate({ id: b.id, riderId: t.id });
-                                  setAssignFor(null);
-                                }}
-                                className="flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-xs hover:bg-white/5"
-                              >
-                                <TechAvatar
-                                  name={t.name}
-                                  photoUrl={(t as any).photoUrl}
-                                  color={t.color}
-                                  className="h-5 w-5"
-                                  textClassName="text-[9px]"
-                                />
-                                <span className="font-medium text-slate-200">
-                                  {t.name}
-                                </span>
-                                <span className="ml-auto capitalize text-[10px] text-slate-500">
-                                  {t.status}
-                                </span>
-                              </button>
-                            ))}
+                            {(() => {
+                              const reqSc = (b as any).requiredSkillClass ?? "";
+                              const matchedTechs = reqSc ? techs.filter((t: any) => t.skillClass === reqSc) : techs;
+                              const otherTechs = reqSc ? techs.filter((t: any) => t.skillClass !== reqSc) : [];
+                              const renderTech = (t: any, dimmed = false) => (
+                                <button
+                                  key={t.id}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    assign.mutate({ id: b.id, riderId: t.id });
+                                    setAssignFor(null);
+                                  }}
+                                  className={`flex w-full items-center gap-2 rounded-md px-1.5 py-1.5 text-left text-xs hover:bg-white/5 ${dimmed ? "opacity-50" : ""}`}
+                                >
+                                  <TechAvatar
+                                    name={t.name}
+                                    photoUrl={(t as any).photoUrl}
+                                    color={t.color}
+                                    className="h-5 w-5"
+                                    textClassName="text-[9px]"
+                                  />
+                                  <span className="font-medium text-slate-200">{t.name}</span>
+                                  {t.skillClass && <span className={`rounded-full px-1 py-0.5 text-[9px] font-semibold ${!dimmed ? "bg-brand/20 text-brand" : "bg-white/10 text-slate-500"}`}>{t.skillClass}</span>}
+                                  <span className="ml-auto capitalize text-[10px] text-slate-500">{t.status}</span>
+                                </button>
+                              );
+                              if (techs.length === 0) return <p className="px-1 py-2 text-xs text-slate-500">No {nounPlural.toLowerCase()} found.</p>;
+                              return (
+                                <>
+                                  {matchedTechs.map((t: any) => renderTech(t, false))}
+                                  {otherTechs.length > 0 && reqSc && (
+                                    <>
+                                      <p className="px-1 pt-1 text-[10px] text-slate-600">— other {nounPlural.toLowerCase()} —</p>
+                                      {otherTechs.map((t: any) => renderTech(t, true))}
+                                    </>
+                                  )}
+                                </>
+                              );
+                            })()}
                           </div>
                         </div>
                       )}
@@ -853,9 +887,37 @@ export default function SchedulerPage() {
 
         {/* technician lanes */}
         <div className="space-y-3">
-          {techs.map((t) => {
+          {/* skill class filter bar */}
+          {boardSkillClasses.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-white/5 bg-ink-3/60 px-3 py-2">
+              <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">Filter by skill:</span>
+              <button
+                type="button"
+                onClick={() => setSkillFilter("")}
+                className={`rounded-full px-2.5 py-0.5 text-xs font-semibold transition ${skillFilter === "" ? "bg-brand text-white" : "bg-white/10 text-slate-300 hover:bg-white/15"}`}
+              >
+                All
+              </button>
+              {boardSkillClasses.map((sc) => (
+                <button
+                  key={sc}
+                  type="button"
+                  onClick={() => setSkillFilter(sc === skillFilter ? "" : sc)}
+                  className={`rounded-full px-2.5 py-0.5 text-xs font-semibold transition ${skillFilter === sc ? "bg-brand text-white" : "bg-white/10 text-slate-300 hover:bg-white/15"}`}
+                >
+                  {sc}
+                </button>
+              ))}
+              {skillFilter && (
+                <span className="ml-auto text-xs text-slate-500">{filteredTechs.length} of {techs.length} shown</span>
+              )}
+            </div>
+          )}
+          {filteredTechs.map((t) => {
             const jobs = byTech(t.id);
             const over = overTech === t.id;
+            // dim this lane if dragging a job that requires a different skill class
+            const skillMismatch = dragSkillClass && (t as any).skillClass !== dragSkillClass;
             return (
               <div
                 key={t.id}
@@ -865,7 +927,7 @@ export default function SchedulerPage() {
                 }}
                 onDragLeave={() => setOverTech((v) => (v === t.id ? null : v))}
                 onDrop={() => onDrop(t.id)}
-                className={`nvc-card p-3 transition ${over ? "drop-active" : ""}`}
+                className={`nvc-card p-3 transition ${over ? "drop-active" : ""} ${skillMismatch ? "opacity-40 pointer-events-none" : ""}`}
               >
                 <div className="mb-2 flex items-center gap-3">
                   <TechAvatar

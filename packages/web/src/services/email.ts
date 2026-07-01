@@ -103,6 +103,40 @@ export function resolveLogo(url?: string): string {
 }
 
 /**
+ * Resolve the outbound "from" address for a tenant.
+ * Reads emailFromName + emailFromAddress from notification_channels (the
+ * canonical per-tenant sender identity, configurable in Notifications settings).
+ * Falls back to the global EMAIL_FROM env var if not configured.
+ *
+ * Only honours the custom address if the domain portion is non-empty.
+ * Returns an empty object to let sendEmail use its own default when no override exists.
+ */
+export async function resolveFromAddress(companyId: string): Promise<{ from?: string; replyTo?: string }> {
+  try {
+    const [chan] = await db
+      .select({
+        emailFromName: schema.notificationChannels.emailFromName,
+        emailFromAddress: schema.notificationChannels.emailFromAddress,
+        emailReplyTo: schema.notificationChannels.emailReplyTo,
+      })
+      .from(schema.notificationChannels)
+      .where(eq(schema.notificationChannels.companyId, companyId))
+      .limit(1);
+    if (!chan?.emailFromAddress?.trim()) return {};
+    const domain = chan.emailFromAddress.split("@")[1]?.toLowerCase() || "";
+    if (!domain) return {};
+    const displayName = (chan.emailFromName || "").trim() || domain;
+    return {
+      from: `${displayName} <${chan.emailFromAddress.trim()}>`,
+      replyTo: chan.emailReplyTo?.trim() || undefined,
+    };
+  } catch (e) {
+    console.error("resolveFromAddress failed", e);
+    return {};
+  }
+}
+
+/**
  * Resolve a tenant's email brand by companyId. Prefers the notification-channel
  * email identity (logo/color), falling back to the company_settings brand, then
  * to the NVC360 default. Safe to call with undefined — returns the default.

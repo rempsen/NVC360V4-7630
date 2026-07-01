@@ -138,11 +138,14 @@ export type JobUnitLine = {
   price: number;     // line customer charge
   cost: number;      // line tech pay
 };
+export type JobPhoto = { url: string; caption?: string };
+
 export async function buildJobPdf(
   details: { field: string; value: any }[],
   unitLines: JobUnitLine[],
   title: string,
   subtitle?: string,
+  photos?: JobPhoto[],
 ): Promise<Buffer> {
   const doc = await PDFDocument.create();
   const font = await doc.embedFont(StandardFonts.Helvetica);
@@ -236,6 +239,46 @@ export async function buildJobPdf(
     drawCell(money(totCharge), 5, y - 10, bold);
     drawCell(money(totPay), 6, y - 10, bold, rgb(0.72, 0.45, 0.05));
     y -= 18;
+  }
+
+  // --- photos section ---
+  if (photos && photos.length > 0) {
+    ensure(40);
+    page.drawText("Field Photos", { x: margin, y, size: 11, font: bold, color: rgb(0.1, 0.12, 0.15) });
+    y -= 14;
+
+    // Attempt to embed each photo from its URL
+    for (const ph of photos) {
+      ensure(24);
+      // Show caption/URL as text (image embedding not guaranteed for all URLs)
+      const caption = ph.caption ? `📷 ${ph.caption}` : "📷 Photo";
+      page.drawText(caption, { x: margin + 4, y: y - 8, size: 8, font: bold, color: rgb(0.25, 0.3, 0.36) });
+      const urlText = ph.url.length > 80 ? ph.url.slice(0, 78) + "…" : ph.url;
+      page.drawText(urlText, { x: margin + 4, y: y - 18, size: 7, font, color: rgb(0.04, 0.42, 0.72) });
+      y -= 28;
+    }
+
+    // Attempt to embed actual images (best-effort: skip on failure)
+    let imgY = y;
+    for (const ph of photos) {
+      try {
+        const resp = await fetch(ph.url);
+        if (!resp.ok) continue;
+        const buf = Buffer.from(await resp.arrayBuffer());
+        const ct = resp.headers.get("content-type") || "";
+        let img;
+        if (ct.includes("png")) img = await doc.embedPng(buf);
+        else img = await doc.embedJpg(buf);
+        const maxW = usableW / 2 - 10;
+        const maxH = 160;
+        const scale = Math.min(maxW / img.width, maxH / img.height, 1);
+        const w = img.width * scale;
+        const h = img.height * scale;
+        ensure(h + 16);
+        page.drawImage(img, { x: margin, y: y - h, width: w, height: h });
+        y -= h + 12;
+      } catch { /* skip unembeddable images */ }
+    }
   }
 
   const bytes = await doc.save();

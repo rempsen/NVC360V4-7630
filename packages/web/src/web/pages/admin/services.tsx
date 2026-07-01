@@ -77,7 +77,7 @@ export default function AdminServices() {
                 </button>
                 <button
                   onClick={() => confirm(`Delete "${s.name}"?`) && del.mutate(s.id)}
-                  className="grid w-10 place-items-center rounded-lg bg-red-500/100/10 text-red-400 hover:bg-red-500/100/20"
+                  className="grid w-10 place-items-center rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20"
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </button>

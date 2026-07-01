@@ -125,17 +125,37 @@ export const messagesRoutes = new Hono()
     return c.json({ count }, 200);
   })
 
-  // ── Dispatch side: list every tech's direct thread w/ unread count ───────
+  // ── Dispatch side: list every tech's direct thread w/ unread count + tags ─
   .get("/dispatch/threads", requireAdmin, async (c) => {
     const t = tx(c);
+    const cId = tenantId(c);
     const riders = await t.select(schema.riders);
     // scope the id->name lookup to this tenant's users (global table, explicit filter)
-    const users = await db.select().from(schema.user).where(eq(schema.user.companyId, tenantId(c)));
+    const users = await db.select().from(schema.user).where(eq(schema.user.companyId, cId));
     const userById = new Map(users.map((u) => [u.id, u]));
 
     // all direct messages (no booking)
     const all = await t.select(schema.messages, isNull(schema.messages.bookingId));
     all.sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
+
+    // fetch tags for all riders in this company
+    const allEntityTags = await db
+      .select({ entityId: schema.entityTags.entityId, tagId: schema.entityTags.tagId })
+      .from(schema.entityTags)
+      .where(and(eq(schema.entityTags.companyId, cId), eq(schema.entityTags.entityType, "tech")));
+    const allTags = await db
+      .select()
+      .from(schema.tags)
+      .where(eq(schema.tags.companyId, cId));
+    const tagById = new Map(allTags.map((tg) => [tg.id, tg]));
+    // map riderId -> tags array
+    const riderTagsMap = new Map<string, Array<{ id: string; label: string; color: string }>>();
+    for (const et of allEntityTags) {
+      const tg = tagById.get(et.tagId);
+      if (!tg) continue;
+      if (!riderTagsMap.has(et.entityId)) riderTagsMap.set(et.entityId, []);
+      riderTagsMap.get(et.entityId)!.push({ id: tg.id, label: tg.label, color: tg.color });
+    }
 
     const threads = riders.map((r) => {
       const msgs = all.filter((m) => m.riderId === r.id);
@@ -149,6 +169,7 @@ export const messagesRoutes = new Hono()
         color: r.color ?? "#0ea5e9",
         status: r.status ?? "offline",
         skillClass: r.skillClass ?? null,
+        tags: riderTagsMap.get(r.id) ?? [],
         lastMessage: last?.body ?? null,
         lastSenderRole: last?.senderRole ?? null,
         lastAt: last?.createdAt ?? null,
@@ -239,6 +260,125 @@ export const messagesRoutes = new Hono()
     });
 
     return c.json({ message: m }, 201);
+  })
+
+  // ── Broadcast: send to all drivers, available drivers, or by tag ──────────
+  // POST /api/messages/broadcast
+  .post("/broadcast", requireAdmin, async (c) => {
+    const u = c.get("user") as SessionUser;
+    const t = tx(c);
+    const cId = tenantId(c);
+
+    const { body, target } = await c.req.json();
+    // target: { type: "all" | "available" | "tag", tagId?: string }
+    if (!body?.trim()) return c.json({ message: "Message is required" }, 400);
+    if (!target?.type) return c.json({ message: "target.type required" }, 400);
+
+    // get all riders
+    let riders = await t.select(schema.riders);
+
+    if (target.type === "available") {
+      riders = riders.filter((r) => r.status === "available");
+    } else if (target.type === "tag" && target.tagId) {
+      const taggedEntityIds = await db
+        .select({ entityId: schema.entityTags.entityId })
+        .from(schema.entityTags)
+        .where(
+          and(
+            eq(schema.entityTags.companyId, cId),
+            eq(schema.entityTags.entityType, "tech"),
+            eq(schema.entityTags.tagId, target.tagId),
+          ),
+        );
+      const ids = new Set(taggedEntityIds.map((e) => e.entityId));
+      riders = riders.filter((r) => ids.has(r.id));
+    } else if (target.type === "skillClass" && target.skillClass) {
+      riders = riders.filter(
+        (r) => (r.skillClass ?? "General").toLowerCase() === target.skillClass.toLowerCase(),
+      );
+    } else if (target.type === "skill" && target.skill) {
+      // skill is a csv tag stored on riders.skills
+      const needle = target.skill.toLowerCase();
+      riders = riders.filter((r) => {
+        const skills = (r.skills ?? "")
+          .split(",")
+          .map((s: string) => s.trim().toLowerCase())
+          .filter(Boolean);
+        return skills.includes(needle);
+      });
+    }
+
+    if (riders.length === 0) {
+      return c.json({ message: "No drivers match this target", sent: 0 }, 200);
+    }
+
+    const broadcastId = crypto.randomUUID();
+    let sent = 0;
+    for (const rider of riders) {
+      await t.insert(schema.messages, {
+        riderId: rider.id,
+        senderRole: "dispatch",
+        senderName: u.name || "Dispatch",
+        body,
+        channel: "broadcast",
+        // store broadcastId in a custom field we append to body? No — use channel="broadcast"
+        // We embed broadcastId so the mobile can group them — we'll just tag the channel
+      });
+      await t.insert(schema.notifications, {
+        userId: rider.userId,
+        type: "reminder",
+        title: `Broadcast from ${u.name || "Dispatch"}`,
+        body,
+      });
+      sent++;
+    }
+
+    return c.json({ sent, broadcastId }, 201);
+  })
+
+  // GET /api/messages/tags — return tech-scoped tags for broadcast targeting
+  .get("/tags", requireAdmin, async (c) => {
+    const cId = tenantId(c);
+    const techTags = await db
+      .select()
+      .from(schema.tags)
+      .where(and(eq(schema.tags.companyId, cId)));
+    // include all tags (both + tech scope)
+    const filtered = techTags.filter((t) => t.scope === "tech" || t.scope === "both");
+    return c.json({ tags: filtered }, 200);
+  })
+
+  // GET /api/messages/skill-classes — distinct skill classes across all riders in tenant
+  .get("/skill-classes", requireAdmin, async (c) => {
+    const t = tx(c);
+    const riders = await t.select(schema.riders);
+    // collect distinct skill classes
+    const classMap = new Map<string, number>();
+    for (const r of riders) {
+      const sc = (r.skillClass ?? "General").trim();
+      if (sc) classMap.set(sc, (classMap.get(sc) ?? 0) + 1);
+    }
+    const skillClasses = Array.from(classMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return c.json({ skillClasses }, 200);
+  })
+
+  // GET /api/messages/skills — distinct individual skills (csv) across all riders
+  .get("/skills", requireAdmin, async (c) => {
+    const t = tx(c);
+    const riders = await t.select(schema.riders);
+    const skillMap = new Map<string, number>();
+    for (const r of riders) {
+      const raw = (r.skills ?? "").split(",").map((s: string) => s.trim()).filter(Boolean);
+      for (const s of raw) {
+        skillMap.set(s, (skillMap.get(s) ?? 0) + 1);
+      }
+    }
+    const skills = Array.from(skillMap.entries())
+      .map(([name, count]) => ({ name, count }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return c.json({ skills }, 200);
   })
 
   // ── Job thread (booking-scoped) ──────────────────────────────────────────

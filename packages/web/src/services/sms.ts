@@ -68,7 +68,7 @@ export async function sendSms(to: string, body: string): Promise<SmsResult> {
   }
 }
 
-const SITE = (process.env.WEBSITE_URL || "http://localhost:4200").replace(/\/$/, "");
+const SITE = (process.env.WEBSITE_URL || process.env.APP_URL || "http://localhost:4200").replace(/\/$/, "");
 
 export function trackingUrl(token: string): string {
   return `${SITE}/t/${token}`;

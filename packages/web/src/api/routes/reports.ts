@@ -210,8 +210,9 @@ export const reportsRoutes = new Hono()
 
         const totalJobs = rows.reduce((s, r) => s + r.jobs, 0);
         const totalRev = rows.reduce((s, r) => s + r.revenue, 0);
-        const avgRating = rows.filter((r) => r.rating).length
-          ? rows.reduce((s, r) => s + r.rating, 0) / rows.filter((r) => r.rating).length : 0;
+        const ratedRows = rows.filter((r) => r.rating > 0);
+        const avgRating = ratedRows.length
+          ? ratedRows.reduce((s, r) => s + r.rating, 0) / ratedRows.length : 0;
 
         out = {
           kpis: [

@@ -9,11 +9,15 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { MapPin, CaretRight, Clock } from "phosphor-react-native";
+import { MapPin, CaretRight, Clock, CurrencyDollar, CheckCircle } from "phosphor-react-native";
 import { api } from "../../lib/api";
 import { authClient } from "../../lib/auth";
 import { C, fmtDate, money } from "../../lib/theme";
 import { StatusBadge, Card, Button, FullLoader, Empty } from "../../components/ui";
+import Constants from "expo-constants";
+import { getToken } from "../../lib/auth";
+
+const API = ((Constants.expoConfig?.extra?.apiUrl as string) ?? "").replace(/\/$/, "");
 
 type Booking = any;
 
@@ -36,6 +40,18 @@ export default function Jobs() {
     refetchInterval: 20000,
   });
 
+  const { data: todayStats } = useQuery({
+    queryKey: ["today-stats"],
+    queryFn: async () => {
+      const res = await fetch(`${API}/api/bookings/today-stats`, {
+        headers: { Authorization: `Bearer ${getToken()}` },
+      });
+      if (!res.ok) return { jobsDone: 0, earnings: 0, activeJobs: 0, totalToday: 0 };
+      return res.json() as Promise<{ jobsDone: number; earnings: number; activeJobs: number; totalToday: number }>;
+    },
+    refetchInterval: 30000,
+  });
+
   const accept = useMutation({
     mutationFn: async (id: string) => {
       const res = await api.bookings[":id"].accept.$post({ param: { id } });
@@ -54,7 +70,10 @@ export default function Jobs() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["bookings"] }),
   });
 
-  const onRefresh = useCallback(() => refetch(), [refetch]);
+  const onRefresh = useCallback(() => {
+    refetch();
+    qc.invalidateQueries({ queryKey: ["today-stats"] });
+  }, [refetch, qc]);
 
   if (isLoading) return <FullLoader label="Loading your jobs…" />;
 
@@ -65,6 +84,8 @@ export default function Jobs() {
   );
   const upcoming = active.filter((b) => b.status === "assigned");
   const inflight = active.filter((b) => b.status !== "assigned");
+
+  const stats = todayStats ?? { jobsDone: 0, earnings: 0, activeJobs: 0, totalToday: 0 };
 
   return (
     <SafeAreaView style={s.safe} edges={["top", "left", "right"]}>
@@ -78,6 +99,33 @@ export default function Jobs() {
           <Text style={s.countLbl}>active</Text>
         </View>
       </View>
+
+      {/* Today's earnings summary strip */}
+      {(stats.jobsDone > 0 || stats.totalToday > 0) && (
+        <View style={s.statsStrip}>
+          <View style={s.statItem}>
+            <CheckCircle color={C.green} size={16} weight="fill" />
+            <Text style={s.statVal}>{stats.jobsDone}</Text>
+            <Text style={s.statLbl}>done today</Text>
+          </View>
+          <View style={s.statDivider} />
+          <View style={s.statItem}>
+            <CurrencyDollar color={C.green} size={16} weight="fill" />
+            <Text style={s.statVal}>{money(stats.earnings)}</Text>
+            <Text style={s.statLbl}>earned today</Text>
+          </View>
+          {stats.totalToday > 0 && (
+            <>
+              <View style={s.statDivider} />
+              <View style={s.statItem}>
+                <Clock color={C.sub} size={16} weight="fill" />
+                <Text style={s.statVal}>{stats.jobsDone}/{stats.totalToday}</Text>
+                <Text style={s.statLbl}>jobs</Text>
+              </View>
+            </>
+          )}
+        </View>
+      )}
 
       <ScrollView
         contentContainerStyle={s.scroll}
@@ -204,6 +252,24 @@ const s = StyleSheet.create({
   },
   countNum: { color: C.brand, fontSize: 20, fontWeight: "800" },
   countLbl: { color: C.muted, fontSize: 11, fontWeight: "600" },
+  statsStrip: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    marginHorizontal: 16,
+    marginBottom: 8,
+    backgroundColor: C.card,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: C.border,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    gap: 0,
+  },
+  statItem: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5 },
+  statVal: { color: C.green, fontSize: 14, fontWeight: "800" },
+  statLbl: { color: C.muted, fontSize: 11 },
+  statDivider: { width: 1, height: 24, backgroundColor: C.border },
   scroll: { padding: 16, gap: 22, paddingBottom: 40 },
   section: { color: C.sub, fontSize: 13, fontWeight: "800", textTransform: "uppercase", letterSpacing: 1 },
   jobTop: { flexDirection: "row", alignItems: "flex-start", gap: 12 },

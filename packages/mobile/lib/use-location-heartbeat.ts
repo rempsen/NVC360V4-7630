@@ -18,6 +18,11 @@ import { getToken } from "./auth";
  *  2. Foreground watcher gives tighter, more responsive updates while the tech
  *     has the app open and is looking at the map.
  *
+ * Presence signal: on mount and every time the app comes to the foreground we
+ * send { status: "available" } so the server stamps locationUpdatedAt
+ * IMMEDIATELY — even before the first GPS fix arrives. This prevents the
+ * scheduler from showing the tech as "Offline" during the GPS warm-up window.
+ *
  * Per-job ETA pings still happen separately inside the job screen while enroute.
  */
 
@@ -34,6 +39,22 @@ async function pushLocation(lat: number, lng: number) {
     await api.riders.me.$patch({ json: { lat, lng } });
   } catch {
     /* offline / transient — next tick retries */
+  }
+}
+
+/**
+ * Send an "I'm alive" signal without requiring GPS coords.
+ * This stamps locationUpdatedAt on the server so the presence system sees the
+ * tech as online even before a GPS fix has arrived or if location permission
+ * is set to "While Using" and the foreground watcher hasn't fired yet.
+ * Uses status:"available" which the backend treats as a liveness signal.
+ */
+async function pingOnline() {
+  if (!getToken()) return;
+  try {
+    await api.riders.me.$patch({ json: { status: "available" } });
+  } catch {
+    /* transient — ignore */
   }
 }
 
@@ -94,6 +115,7 @@ async function stopBackgroundUpdates() {
 export function useLocationHeartbeat() {
   const watcher = useRef<Location.LocationSubscription | null>(null);
   const granted = useRef(false);
+  const keepaliveTimer = useRef<ReturnType<typeof setInterval> | null>(null);
 
   async function sendOnce() {
     if (!getToken()) return;
@@ -133,6 +155,18 @@ export function useLocationHeartbeat() {
   useEffect(() => {
     let mounted = true;
 
+    // ── Immediate online signal ──────────────────────────────────────────────
+    // Stamp locationUpdatedAt on the server RIGHT NOW so dispatch sees the tech
+    // as online before the first GPS ping. This is the fix for the "Offline"
+    // display bug when the app is freshly opened.
+    pingOnline();
+
+    // ── Keepalive: re-ping every 90s even if GPS is stale/denied ────────────
+    // Ensures locationUpdatedAt stays fresh within the 3-minute liveness window.
+    keepaliveTimer.current = setInterval(() => {
+      if (getToken()) pingOnline();
+    }, 90_000);
+
     (async () => {
       // Kick off background updates first (handles the locked-phone case),
       // then layer the tighter foreground watcher on top while app is open.
@@ -142,17 +176,23 @@ export function useLocationHeartbeat() {
       await startForeground();
     })();
 
-    // Refresh a fix whenever the app returns to the foreground.
+    // Refresh a fix + online signal whenever the app returns to the foreground.
     const sub = AppState.addEventListener("change", (s: AppStateStatus) => {
-      if (s === "active" && granted.current) {
-        lastSent = 0; // force an immediate send
-        sendOnce();
+      if (s === "active") {
+        // Always ping online immediately on foreground — GPS may need a moment
+        // to warm up and we don't want the tech to flap to "offline" meanwhile.
+        pingOnline();
+        if (granted.current) {
+          lastSent = 0; // force an immediate GPS send too
+          sendOnce();
+        }
       }
     });
 
     return () => {
       mounted = false;
       stopForeground();
+      if (keepaliveTimer.current) clearInterval(keepaliveTimer.current);
       sub.remove();
       // NOTE: we intentionally leave background updates running so the pin keeps
       // moving after the app is backgrounded. They are stopped explicitly on

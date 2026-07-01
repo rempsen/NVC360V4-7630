@@ -7,6 +7,26 @@ import { resolvePublicKey, hashApiKey } from "../middleware/auth";
 import { putObject } from "../lib/storage";
 import { rateLimit, keyByIp } from "../lib/rate-limit";
 import { fireEvent } from "../../services/dispatch";
+import { isInAnyZone } from "../../shared/zone-utils";
+
+/** Fallback types for core fields that may be missing `type` in legacy rows */
+const CORE_KEY_TYPES: Record<string, string> = {
+  name: "text",
+  email: "email",
+  phone: "tel",
+  address: "address",
+  message: "textarea",
+  service_type: "select",
+  preferred_date: "date",
+  company_name: "text",
+};
+
+function normalizePublicFields(raw: any[]): any[] {
+  return raw.map((f: any) => ({
+    ...f,
+    type: f.type || CORE_KEY_TYPES[f.key] || "text",
+  }));
+}
 
 /**
  * PUBLIC, UNAUTHENTICATED tenant intake forms.
@@ -160,7 +180,7 @@ export const publicFormsRoutes = new Hono()
       form: {
         title: form.title,
         intro: form.intro,
-        fields: JSON.parse(form.fields || "[]"),
+        fields: normalizePublicFields(JSON.parse(form.fields || "[]")),
         sections: JSON.parse(form.sections || "[]"),
         brandColor: form.brandColor,
         logoUrl: form.logoUrl,
@@ -337,6 +357,18 @@ export const publicFormsRoutes = new Hono()
       const buf = Buffer.from(await photoFile.arrayBuffer());
       const stored = await putObject(key, buf, photoFile.type || "image/jpeg");
       photoUrl = stored.url;
+    }
+
+    // ---- zone enforcement (if client submitted geocoded lat/lng with the form) ----
+    const subLat = typeof body.lat === "number" ? body.lat : parseFloat(body.lat);
+    const subLng = typeof body.lng === "number" ? body.lng : parseFloat(body.lng);
+    if (subLat && subLng && !isNaN(subLat) && !isNaN(subLng)) {
+      const allZones = await t.select(schema.serviceZones);
+      const parsedZones = allZones.map((z) => ({ polygon: JSON.parse(z.polygon || "[]") as [number, number][], active: z.active }));
+      const activeZones = parsedZones.filter((z) => z.active && z.polygon.length >= 3);
+      if (activeZones.length > 0 && !isInAnyZone(subLat, subLng, parsedZones)) {
+        return c.json({ message: "Sorry, your address is outside our service area. Please contact us directly for availability." }, 422);
+      }
     }
 
     // ---- create the pending lead booking ----

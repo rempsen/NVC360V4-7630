@@ -5,6 +5,7 @@ import { fireEvent } from "./dispatch";
 import { recomputeBooking, accrueTechPay } from "./billing";
 import { reconcileRiderStatus } from "./presence";
 import { publishTrack } from "./realtime";
+import { pushLiveActivityJobUpdate } from "./apns";
 
 const EVENT_FOR_STATUS: Record<string, any> = {
   confirmed: "created",
@@ -120,6 +121,16 @@ export async function applyBookingStatus(
   if (b.publicToken) {
     void publishTrack({ type: "status", token: b.publicToken, data: { status } });
   }
+
+  // push Live Activity update to driver's Dynamic Island / lock screen (iOS)
+  void pushLiveActivityJobUpdate({
+    id: b.id,
+    customFields: b.customFields as any,
+    status,
+    etaMins: b.etaMins ?? null,
+    customerName: (b as any).customerName ?? null,
+    address: b.address ?? null,
+  });
 
   return b;
 }

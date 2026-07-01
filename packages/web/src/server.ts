@@ -140,6 +140,32 @@ const server = Bun.serve({
 
 console.log(`Web server listening on http://localhost:${server.port}`);
 
+// ---------------------------------------------------------------------------
+// Self-ping keep-alive: prevents the Runable (and similar platforms') idle
+// shutdown from hibernating the container after extended inactivity.
+//
+// Every 4 minutes we fetch our own /api/ready endpoint. This keeps the process
+// marked "active" by the host runtime and also warms the DB connection. The
+// ping uses the public APP_URL (env var set by Runable) so it goes through the
+// full CDN + routing path, the same as a real user request, rather than a
+// loopback that could be optimised away by the platform.
+//
+// If APP_URL is not set (local dev), we fall back to localhost so dev mode is
+// unaffected.
+// ---------------------------------------------------------------------------
+const SELF_PING_URL =
+  (process.env.APP_URL ?? `http://localhost:${port}`).replace(/\/$/, "") +
+  "/api/ready";
+
+setInterval(async () => {
+  try {
+    const r = await fetch(SELF_PING_URL, { signal: AbortSignal.timeout(10_000) });
+    if (!r.ok) console.warn(`[keep-alive] /api/ready returned ${r.status}`);
+  } catch {
+    // Network errors during a self-ping are non-fatal — just swallow.
+  }
+}, 4 * 60 * 1000);
+
 // Graceful shutdown: stop accepting traffic, then close Redis connections so a
 // rolling deploy doesn't leave dangling sockets / half-published messages.
 let shuttingDown = false;

@@ -123,7 +123,29 @@ export const trackingRoutes = new Hono()
     if (b?.publicToken) {
       void publishTrack({ type: "location", token: b.publicToken, data: { lat, lng } });
     }
-    return c.json({ success: true }, 200);
+
+    // Return current etaMins so the mobile app can update Live Activity countdown
+    const freshEta = (await t.selectOne(schema.bookings, eq(schema.bookings.id, bookingId)))?.etaMins ?? null;
+    return c.json({ success: true, etaMins: freshEta }, 200);
+  })
+  // driver registers/refreshes Live Activity push token so server can send APNs updates
+  .post("/:bookingId/live-activity-token", requireAuth, async (c) => {
+    const bookingId = c.req.param("bookingId");
+    const { token, type } = await c.req.json<{ token: string; type: "update" | "start" }>();
+    if (!token) return c.json({ ok: false }, 400);
+    const t = tx(c);
+    // Store on the booking row (live_activity_token + push_to_start_token columns)
+    // We use JSON extra field pattern (stored in bookings.customFields) to avoid migration
+    const b = await t.selectOne(schema.bookings, eq(schema.bookings.id, bookingId));
+    if (!b) return c.json({ ok: false, message: "Not found" }, 404);
+    const cf = (b.customFields as Record<string, any>) ?? {};
+    if (type === "start") {
+      cf.__la_push_start_token = token;
+    } else {
+      cf.__la_push_update_token = token;
+    }
+    await t.update(schema.bookings, eq(schema.bookings.id, bookingId), { customFields: cf });
+    return c.json({ ok: true });
   })
   // customer fetches latest rider location for a booking
   .get("/:bookingId", requireAuth, async (c) => {

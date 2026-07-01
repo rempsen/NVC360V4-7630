@@ -39,7 +39,7 @@ function isTransient(err: unknown): boolean {
     (err as { message?: string })?.message ??
     (err as { code?: string })?.code ??
     String(err);
-  const code = (err as { code?: string })?.code ?? "";
+  const code = String((err as any)?.code ?? "");
   return TRANSIENT.some((t) => msg.includes(t) || code.includes(t));
 }
 

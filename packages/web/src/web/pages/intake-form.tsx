@@ -41,6 +41,12 @@ type Service = { id: string; name: string; category: string };
 
 const CORE_KEYS = new Set(["name", "email", "phone", "address", "serviceType", "preferredAt", "notes", "photo"]);
 
+// Fallback types for core keys — defensive against legacy rows saved without type
+const CORE_KEY_TYPES: Record<string, string> = {
+  name: "text", email: "email", phone: "phone", address: "address",
+  serviceType: "select", preferredAt: "date", notes: "textarea", photo: "file",
+};
+
 export default function IntakeForm() {
   const [, params] = useRoute("/f/:companyId/:slug");
   const companyId = params?.companyId ?? "";
@@ -51,6 +57,7 @@ export default function IntakeForm() {
   const [services, setServices] = useState<Service[]>([]);
   const [loadErr, setLoadErr] = useState("");
   const [v, setV] = useState<Record<string, string>>({});
+  const [addrCoords, setAddrCoords] = useState<{ lat: number | null; lng: number | null }>({ lat: null, lng: null });
   const [photo, setPhoto] = useState<File | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState<string | null>(null);
@@ -83,6 +90,8 @@ export default function IntakeForm() {
       });
       if (v.serviceId) fd.append("serviceId", v.serviceId);
       if (photo) fd.append("photo", photo);
+      if (addrCoords.lat != null) fd.append("lat", String(addrCoords.lat));
+      if (addrCoords.lng != null) fd.append("lng", String(addrCoords.lng));
       // every custom field answer
       (cfg?.fields || []).forEach((f) => {
         if (!f.enabled || CORE_KEYS.has(f.key)) return;
@@ -137,6 +146,9 @@ export default function IntakeForm() {
   const renderField = (f: FieldCfg) => {
     if (!f.enabled) return null;
     const req = f.required;
+    // Defensive: resolve missing type from core key map or default to "text"
+    const fType = f.type || CORE_KEY_TYPES[f.key] || "text";
+    f = { ...f, type: fType };
 
     // serviceType maps to the live services dropdown
     if (f.key === "serviceType") {
@@ -159,7 +171,10 @@ export default function IntakeForm() {
             value={v[f.key] || ""}
             inputClassName={inputCls}
             inputStyle={ring(brand)}
-            onResolve={({ address }) => set(f.key, address)}
+            onResolve={({ address, lat, lng }) => {
+              set(f.key, address);
+              setAddrCoords({ lat, lng });
+            }}
           />
         </Field>
       );

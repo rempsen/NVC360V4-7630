@@ -84,16 +84,33 @@ export function activate(fn: () => void) {
 /**
  * For full-screen dismiss overlays/backdrops: clickable to close and also
  * closes on Escape, without being announced as a control (presentational).
+ *
+ * Bug-hardened against drag-to-select text inside modal:
+ * When user drag-selects text, mousedown fires inside the modal but mouseup
+ * can land on the backdrop — browser synthesises a click on the backdrop,
+ * making target===currentTarget true and incorrectly closing the modal.
+ * Fix: track where mousedown started; only close if BOTH mousedown AND
+ * mouseup originated on the backdrop itself (not inside modal content).
  */
 export function dismiss(onClose: () => void) {
+  let mouseDownOnBackdrop = false;
   return {
-    // Only close when the backdrop itself is clicked, not bubbled clicks from
-    // the dialog content — so content no longer needs stopPropagation traps.
-    onClick: (e: import("react").MouseEvent) => {
+    onMouseDown: (e: import("react").MouseEvent) => {
+      mouseDownOnBackdrop = e.target === e.currentTarget;
+    },
+    onMouseUp: (e: import("react").MouseEvent) => {
+      if (!mouseDownOnBackdrop) return;
       if (e.target === e.currentTarget) onClose();
+      mouseDownOnBackdrop = false;
+    },
+    // Keep onClick only for keyboard-triggered synthetic clicks (e.g. Space/Enter on a button)
+    // but guard it so a drag that ends on backdrop doesn't double-fire.
+    onClick: (e: import("react").MouseEvent) => {
+      // Only synthetic (keyboard-triggered) clicks have detail === 0
+      if (e.detail === 0 && e.target === e.currentTarget) onClose();
     },
     onKeyDown: (e: import("react").KeyboardEvent) => {
-      if (e.key === "Escape" || e.key === "Enter") onClose();
+      if (e.key === "Escape") onClose();
     },
     role: "button" as const,
     tabIndex: -1,

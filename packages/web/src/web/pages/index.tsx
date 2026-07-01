@@ -100,15 +100,15 @@ export default function Index() {
                 See how it works
               </a>
             </div>
-            <div className="animate-fade-up delay-4 mt-10 flex items-center gap-8">
+            <div className="animate-fade-up delay-4 mt-10 flex items-center divide-x divide-white/10">
               {[
                 ["20%", "Lower labor cost"],
                 ["800+", "Techs operated"],
                 ["1B", "Hrs wasted / yr"],
-              ].map(([n, l]) => (
-                <div key={l}>
-                  <div className="text-2xl font-black text-white">{n}</div>
-                  <div className="text-xs text-slate-500">{l}</div>
+              ].map(([n, l], i) => (
+                <div key={l} className={i === 0 ? "pr-8" : "px-8"}>
+                  <div className="text-3xl font-black tracking-tight text-white">{n}</div>
+                  <div className="mt-0.5 text-[11px] font-medium uppercase tracking-wider text-slate-500">{l}</div>
                 </div>
               ))}
             </div>
@@ -157,17 +157,25 @@ export default function Index() {
       </section>
 
       {/* Problem stat band */}
-      <section className="border-y border-white/5 bg-ink-2 py-8">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-center gap-x-12 gap-y-4 px-5 text-center">
-          {[
-            [TrendingDown, "20% reduction in labor costs"],
-            [Phone, "Zero 'where is my tech?' calls"],
-            [Clock, "End the 4-hour window. Forever."],
-          ].map(([Icon, t]: any, i) => (
-            <div key={i} className="flex items-center gap-2 text-sm font-semibold text-slate-300">
-              <Icon className="h-4 w-4 text-brand" /> {t}
-            </div>
-          ))}
+      <section className="border-y border-white/5 bg-ink-2 py-10">
+        <div className="mx-auto max-w-6xl px-5">
+          <div className="flex flex-wrap items-center justify-center divide-x divide-white/5">
+            {[
+              [TrendingDown, "20% reduction", "in labor costs"],
+              [Phone, "Zero calls", "'where is my tech?'"],
+              [Clock, "End the 4-hour", "window. Forever."],
+            ].map(([Icon, top, sub]: any, i) => (
+              <div key={i} className={`flex items-center gap-3 ${i === 0 ? "pr-12" : "px-12"} py-2`}>
+                <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-brand/[0.08] text-brand ring-1 ring-brand/20">
+                  <Icon className="h-4 w-4" />
+                </div>
+                <div>
+                  <div className="text-sm font-bold text-white">{top}</div>
+                  <div className="text-xs text-slate-500">{sub}</div>
+                </div>
+              </div>
+            ))}
+          </div>
         </div>
       </section>
 
@@ -175,7 +183,7 @@ export default function Index() {
       <section className="relative overflow-hidden pb-8 pt-16">
         <div className="absolute left-1/2 top-1/2 -z-10 h-[420px] w-[820px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-brand/10 blur-3xl" />
         <div className="mx-auto max-w-6xl px-5 text-center">
-          <span className="text-sm font-bold uppercase tracking-wider text-brand">See it in action</span>
+          <span className="inline-flex items-center rounded-full border border-brand/25 bg-brand/[0.08] px-3 py-1 text-[11px] font-bold uppercase tracking-widest text-brand">See it in action</span>
           <h2 className="mt-2 font-display text-4xl font-black text-white">Uberize your business</h2>
           <p className="mx-auto mt-3 max-w-xl text-slate-400">
             One connected system across dispatch desk, technician phone, and client device —
@@ -192,16 +200,16 @@ export default function Index() {
       {/* Features */}
       <section id="features" className="mx-auto max-w-6xl px-5 py-20">
         <div className="mb-12 text-center">
-          <span className="text-sm font-bold uppercase tracking-wider text-brand">Platform</span>
-          <h2 className="mt-2 font-display text-4xl font-black text-white">
+          <span className="inline-flex items-center rounded-full border border-brand/25 bg-brand/[0.08] px-3 py-1 text-[11px] font-bold uppercase tracking-widest text-brand">Platform</span>
+          <h2 className="mt-4 font-display text-4xl font-black text-white tracking-tight">
             One platform for real-time field service
           </h2>
-          <p className="mx-auto mt-3 max-w-xl text-slate-400">
+          <p className="mx-auto mt-3 max-w-xl text-slate-400 leading-relaxed">
             Unify dispatchers, technicians, and clients into one real-time system —
             no new hardware, no system replacement.
           </p>
         </div>
-        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {[
             { icon: MapPin, t: "Live Fleet Tracking", d: "See every tech color-coded by class & availability. Reassign on the fly — no phone calls." },
             { icon: MessageSquare, t: "Client Experience", d: "Auto SMS + email the moment a tech departs. Live ETA link + two-way messaging." },
@@ -210,12 +218,15 @@ export default function Index() {
             { icon: Plug, t: "Deep Integrations", d: "QuickBooks, Xero, Gmail, Google Calendar, Microsoft 365, Outlook & CompanyCam." },
             { icon: Building2, t: "Robust Admin Backend", d: "Users, billing, settings & full CSV exports in every configuration you need." },
           ].map((f) => (
-            <div key={f.t} className="group rounded-2xl border border-white/5 bg-ink-2 p-6 transition hover:-translate-y-1 hover:border-brand/30 hover:nvc-glow-sm">
-              <div className="grid h-11 w-11 place-items-center rounded-xl bg-brand/10 text-brand">
-                <f.icon className="h-5 w-5" />
+            <div key={f.t} className="group relative rounded-2xl border border-white/[0.06] bg-ink-2 p-6 transition-all duration-200 hover:-translate-y-1 hover:border-brand/25 hover:bg-ink-3 hover:shadow-xl hover:shadow-brand/5">
+              <div className="grid h-10 w-10 place-items-center rounded-xl bg-brand/10 text-brand ring-1 ring-brand/15 transition-all duration-200 group-hover:bg-brand/15 group-hover:ring-brand/25">
+                <f.icon className="h-[18px] w-[18px]" />
               </div>
-              <h3 className="mt-4 font-bold text-white">{f.t}</h3>
-              <p className="mt-2 text-sm text-slate-400">{f.d}</p>
+              <h3 className="mt-5 font-semibold text-white">{f.t}</h3>
+              <p className="mt-2 text-sm leading-relaxed text-slate-400">{f.d}</p>
+              <div className="absolute bottom-4 right-4 opacity-0 transition-opacity duration-150 group-hover:opacity-100">
+                <ArrowRight className="h-4 w-4 text-brand/50" />
+              </div>
             </div>
           ))}
         </div>
@@ -238,7 +249,7 @@ export default function Index() {
               </div>
             </div>
             <div>
-              <span className="text-sm font-bold uppercase tracking-wider text-brand">The client journey</span>
+              <span className="inline-flex items-center rounded-full border border-brand/25 bg-brand/[0.08] px-3 py-1 text-[11px] font-bold uppercase tracking-widest text-brand">The client journey</span>
               <h2 className="mt-2 font-display text-4xl font-black text-white">Dispatch smarter in seconds</h2>
               <p className="mt-4 max-w-md text-slate-400">
                 From the moment a job is created to the moment it's closed, every step is tracked,
@@ -253,8 +264,8 @@ export default function Index() {
               { icon: CheckCircle2, t: "Details at Hand", d: "Scope, checklists, site notes & client info in one organized mobile view." },
               { icon: Zap, t: "Document & Close", d: "Log time & travel, capture photos, collect approvals, close jobs digitally." },
             ].map((s, i) => (
-              <div key={i} className="relative rounded-2xl border border-white/5 bg-ink p-6">
-                <div className="absolute -top-4 left-6 grid h-9 w-9 place-items-center rounded-xl bg-brand font-bold text-ink">{i + 1}</div>
+              <div key={i} className="relative rounded-2xl border border-white/5 bg-ink p-6 transition duration-200 hover:border-brand/20 hover:bg-ink-2">
+                <div className="absolute -top-4 left-6 grid h-9 w-9 place-items-center rounded-xl bg-brand font-black text-ink ring-4 ring-brand/20 text-sm">{i + 1}</div>
                 <s.icon className="mt-4 h-7 w-7 text-brand" />
                 <h3 className="mt-3 font-bold text-white">{s.t}</h3>
                 <p className="mt-2 text-sm text-slate-400">{s.d}</p>
@@ -267,7 +278,7 @@ export default function Index() {
       {/* Industries */}
       <section id="industries" className="mx-auto max-w-6xl px-5 py-20">
         <div className="mb-12 text-center">
-          <span className="text-sm font-bold uppercase tracking-wider text-brand">Industries</span>
+          <span className="inline-flex items-center rounded-full border border-brand/25 bg-brand/[0.08] px-3 py-1 text-[11px] font-bold uppercase tracking-widest text-brand">Industries</span>
           <h2 className="mt-2 font-display text-4xl font-black text-white">If you run a mobile workforce, NVC360 works for you</h2>
         </div>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -299,7 +310,7 @@ export default function Index() {
       {/* Integrations */}
       <section id="integrations" className="border-y border-white/5 bg-ink-2 py-16">
         <div className="mx-auto max-w-6xl px-5 text-center">
-          <span className="text-sm font-bold uppercase tracking-wider text-brand">Integrations</span>
+          <span className="inline-flex items-center rounded-full border border-brand/25 bg-brand/[0.08] px-3 py-1 text-[11px] font-bold uppercase tracking-widest text-brand">Integrations</span>
           <h2 className="mt-2 font-display text-3xl font-black text-white">Keep the systems you trust</h2>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-4">
             {[
@@ -325,7 +336,7 @@ export default function Index() {
       {/* Pricing */}
       <section id="pricing" className="mx-auto max-w-6xl px-5 py-20">
         <div className="text-center">
-          <span className="text-sm font-bold uppercase tracking-wider text-brand">Pricing</span>
+          <span className="inline-flex items-center rounded-full border border-brand/25 bg-brand/[0.08] px-3 py-1 text-[11px] font-bold uppercase tracking-widest text-brand">Pricing</span>
           <h2 className="mt-2 font-display text-3xl font-black text-white sm:text-4xl">Simple, per-vehicle pricing</h2>
           <p className="mx-auto mt-3 max-w-xl text-slate-400">
             One license per vehicle. The more drivers you run, the lower your per-license rate — automatically.
@@ -370,8 +381,8 @@ export default function Index() {
               key={tier.name}
               className={`relative flex flex-col rounded-3xl border p-8 transition ${
                 tier.featured
-                  ? "border-brand/50 bg-gradient-to-br from-ink-2 to-ink shadow-2xl shadow-brand/20 md:-translate-y-3"
-                  : "border-white/10 bg-ink-2 hover:border-brand/30"
+                  ? "border-brand/60 bg-gradient-to-b from-brand/8 to-ink-2 shadow-[0_0_0_1px_rgba(14,165,233,0.3),0_24px_60px_-12px_rgba(14,165,233,0.25)] md:-translate-y-4"
+                  : "border-white/[0.07] bg-ink-2 hover:border-brand/25 hover:bg-ink-3 transition-all duration-200"
               }`}
             >
               {tier.featured && (
@@ -379,7 +390,7 @@ export default function Index() {
                   Most popular
                 </span>
               )}
-              <div className="text-sm font-bold uppercase tracking-wider text-brand">{tier.name}</div>
+              <div className="inline-flex items-center rounded-full border border-brand/25 bg-brand/[0.08] px-3 py-1 text-[11px] font-bold uppercase tracking-widest text-brand">{tier.name}</div>
               <div className="mt-1 text-lg font-semibold text-white">{tier.range}</div>
               <div className="mt-6 flex items-end gap-1">
                 <span className="text-2xl font-bold text-slate-400">$</span>

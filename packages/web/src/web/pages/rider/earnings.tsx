@@ -3,7 +3,7 @@ import { api } from "../../lib/api";
 import { FullLoader } from "../../components/loader";
 import { fmtDate, money } from "../../lib/utils";
 import { StatusBadge } from "../../components/brand";
-import { Wallet, TrendingUp, CheckCircle2, CalendarDays } from "lucide-react";
+import { Wallet, TrendingUp, CheckCircle2, CalendarDays, AlertCircle } from "lucide-react";
 
 export default function RiderEarnings() {
   const bookings = useQuery({
@@ -13,15 +13,26 @@ export default function RiderEarnings() {
 
   if (bookings.isLoading) return <FullLoader label="Loading earnings…" />;
 
+  if (bookings.isError) return (
+    <div className="flex flex-col items-center gap-3 py-20 text-center">
+      <AlertCircle className="h-8 w-8 text-red-400" />
+      <p className="text-sm text-slate-500">Could not load earnings. Pull to refresh.</p>
+    </div>
+  );
+
   const list = bookings.data?.bookings ?? [];
   const completed = list.filter((b) => b.status === "completed");
-  const total = completed.reduce((s, b) => s + (b.price ?? 0), 0);
+
+  // Use techPay if available (unit-line jobs), fallback to price
+  const toEarnings = (b: any) => Number(b.techPay ?? b.price ?? 0);
+
+  const total = completed.reduce((s, b) => s + toEarnings(b), 0);
 
   const now = Date.now();
   const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
   const weekly = completed
     .filter((b) => new Date(b.scheduledAt).getTime() >= weekAgo)
-    .reduce((s, b) => s + (b.price ?? 0), 0);
+    .reduce((s, b) => s + toEarnings(b), 0);
 
   return (
     <div className="space-y-6">
@@ -67,7 +78,7 @@ export default function RiderEarnings() {
                     <p className="mt-0.5 text-xs text-slate-500">{fmtDate(b.scheduledAt)}</p>
                     {b.customer && <p className="text-xs text-slate-500">{b.customer.name}</p>}
                   </div>
-                  <div className="font-extrabold text-green-600">+{money(b.price)}</div>
+                  <div className="font-extrabold text-green-600">+{money(toEarnings(b))}</div>
                 </div>
               ))
           )}

@@ -67,8 +67,8 @@ function techIcon(
   });
 }
 
-function esc(s: string) {
-  return s.replace(/[&<>"]/g, (c) =>
+function esc(s: string | null | undefined) {
+  return String(s ?? "").replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c] as string,
   );
 }
@@ -82,12 +82,12 @@ function jobTooltip(j: FleetJob) {
         minute: "2-digit",
       })
     : null;
-  const statusLabel = j.status.replace(/_/g, " ");
+  const statusLabel = (j.status ?? "").replace(/_/g, " ");
   const rows: string[] = [];
   if (when) rows.push(`<div style="display:flex;gap:6px;align-items:center"><span style="opacity:.6">🕑</span>${esc(when)}</div>`);
-  if (j.customerName) rows.push(`<div style="display:flex;gap:6px;align-items:center"><span style="opacity:.6">👤</span>${esc(j.customerName)}</div>`);
-  if (j.address) rows.push(`<div style="display:flex;gap:6px;align-items:flex-start"><span style="opacity:.6">📍</span><span>${esc(j.address)}</span></div>`);
-  if (j.techName) rows.push(`<div style="display:flex;gap:6px;align-items:center"><span style="opacity:.6">👷</span>${esc(j.techName)}</div>`);
+  if (j.customerName) rows.push(`<div style="display:flex;gap:6px;align-items:center"><span style="opacity:.6">👤</span>${esc(j.customerName ?? "")}</div>`);
+  if (j.address) rows.push(`<div style="display:flex;gap:6px;align-items:flex-start"><span style="opacity:.6">📍</span><span>${esc(j.address ?? "")}</span></div>`);
+  if (j.techName) rows.push(`<div style="display:flex;gap:6px;align-items:center"><span style="opacity:.6">👷</span>${esc(j.techName ?? "")}</div>`);
   else rows.push(`<div style="display:flex;gap:6px;align-items:center;color:#fbbf24"><span style="opacity:.6">👷</span>Unassigned</div>`);
   if (j.total != null) rows.push(`<div style="display:flex;gap:6px;align-items:center"><span style="opacity:.6">💲</span>${Number(j.total).toFixed(2)}</div>`);
   return `<div style="min-width:200px;max-width:260px;font-family:Inter,sans-serif;line-height:1.45">
@@ -125,7 +125,7 @@ const STATUS_META: Record<string, { label: string; color: string }> = {
 };
 
 function techTooltip(t: FleetTech, noun = "Technician") {
-  const meta = STATUS_META[t.status] ?? { label: t.status.replace(/_/g, " "), color: t.color };
+  const meta = STATUS_META[t.status] ?? { label: (t.status ?? "unknown").replace(/_/g, " "), color: t.color };
   const rows: string[] = [];
   if (t.skillClass) rows.push(`<div style="display:flex;gap:6px;align-items:center"><span style="opacity:.6">🛠️</span>${esc(t.skillClass)}</div>`);
   if (t.task?.title) {
@@ -136,9 +136,10 @@ function techTooltip(t: FleetTech, noun = "Technician") {
     rows.push(`<div style="display:flex;gap:6px;align-items:center;opacity:.7"><span style="opacity:.6">📋</span>No active task</div>`);
   }
   if (t.jobsToday != null) rows.push(`<div style="display:flex;gap:6px;align-items:center"><span style="opacity:.6">✅</span>${t.jobsToday} job${t.jobsToday === 1 ? "" : "s"} today</div>`);
+  const initials2 = (t.name || "?").split(" ").map((s) => s[0] || "").slice(0, 2).join("");
   const avatar = t.photoUrl
     ? `<div style="width:30px;height:30px;border-radius:9999px;background-image:url('${t.photoUrl}');background-size:cover;background-position:center;flex:0 0 auto"></div>`
-    : `<div style="width:30px;height:30px;border-radius:9999px;background:${t.color};display:flex;align-items:center;justify-content:center;color:#051018;font-weight:800;font-size:11px;flex:0 0 auto">${esc(t.name.split(" ").map((s) => s[0]).slice(0, 2).join(""))}</div>`;
+    : `<div style="width:30px;height:30px;border-radius:9999px;background:${t.color};display:flex;align-items:center;justify-content:center;color:#051018;font-weight:800;font-size:11px;flex:0 0 auto">${esc(initials2)}</div>`;
   return `<div style="min-width:210px;max-width:270px;font-family:Inter,sans-serif;line-height:1.45">
     <div style="display:flex;align-items:center;gap:9px;margin-bottom:7px">
       ${avatar}
@@ -198,9 +199,9 @@ export function FleetMap({
       if (t.lat == null || t.lng == null) continue;
       seen.add(t.id);
       pts.push([t.lat, t.lng]);
-      const initials = t.name
+      const initials = (t.name || "?")
         .split(" ")
-        .map((s) => s[0])
+        .map((s) => s[0] || "")
         .slice(0, 2)
         .join("");
       const active = ["enroute", "onsite", "busy"].includes(t.status);

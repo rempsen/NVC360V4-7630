@@ -139,7 +139,21 @@ export default function AdminDashboard() {
 
   if (stats.isLoading || bookings.isLoading)
     return <FullLoader label="Loading console…" />;
-  const s = stats.data!;
+  if (stats.isError || !stats.data)
+    return (
+      <PageWrap>
+        <div className="flex h-64 flex-col items-center justify-center gap-3 text-center">
+          <p className="text-sm font-semibold text-red-400">Failed to load dashboard stats</p>
+          <button
+            onClick={() => stats.refetch()}
+            className="rounded-lg bg-brand px-4 py-2 text-xs font-semibold text-white hover:bg-brand-deep"
+          >
+            Retry
+          </button>
+        </div>
+      </PageWrap>
+    );
+  const s = stats.data;
   const recent = (bookings.data?.bookings ?? [])
     .slice()
     .sort(
@@ -163,14 +177,16 @@ export default function AdminDashboard() {
       label: "Work orders",
       value: s.totalBookings,
       icon: ClipboardList,
-      tint: "bg-brand/15 text-cyan-glow",
+      iconTint: "bg-sky-500/10 text-sky-400",
+      topBorder: "border-t-sky-500/40",
       to: "/admin/work-orders",
     },
     {
       label: "Active jobs",
       value: s.activeBookings,
       icon: Activity,
-      tint: "bg-amber-warn/15 text-amber-warn",
+      iconTint: "bg-amber-500/10 text-amber-400",
+      topBorder: "border-t-amber-500/40",
       to: "/admin/work-orders?status=active",
       hint: s.activeBookings === 0 ? "Nothing in progress" : undefined,
     },
@@ -178,14 +194,16 @@ export default function AdminDashboard() {
       label: "Completed",
       value: s.completedBookings,
       icon: CheckCircle2,
-      tint: "bg-emerald-live/15 text-emerald-live",
+      iconTint: "bg-emerald-500/10 text-emerald-400",
+      topBorder: "border-t-emerald-500/40",
       to: "/admin/work-orders?status=completed",
     },
     {
       label: "Revenue",
       value: money(s.revenue),
       icon: DollarSign,
-      tint: "bg-emerald-live/15 text-emerald-live",
+      iconTint: "bg-emerald-500/10 text-emerald-400",
+      topBorder: "border-t-emerald-500/40",
       to: "/admin/payouts",
       hint:
         s.revenue === 0 && s.completedBookings > 0
@@ -196,14 +214,16 @@ export default function AdminDashboard() {
       label: "Clients",
       value: s.customers,
       icon: Users,
-      tint: "bg-brand/15 text-cyan-glow",
+      iconTint: "bg-brand/10 text-brand",
+      topBorder: "border-t-brand/40",
       to: "/admin/clients",
     },
     {
       label: workerPlural,
       value: s.riders,
       icon: Wrench,
-      tint: "bg-violet-500/15 text-violet-300",
+      iconTint: "bg-violet-500/10 text-violet-400",
+      topBorder: "border-t-violet-500/40",
       to: "/admin/techs",
     },
   ];
@@ -300,23 +320,25 @@ export default function AdminDashboard() {
           <Link
             key={c.label}
             to={c.to}
-            className="nvc-card group p-4 transition hover:border-brand/40 hover:bg-white/[0.03]"
+            className={`nvc-card group relative overflow-hidden border-t-2 p-5 transition-all duration-200 hover:bg-white/[0.025] hover:shadow-lg hover:shadow-black/20 hover:-translate-y-px ${c.topBorder}`}
           >
-            <div
-              className={`mb-3 grid h-10 w-10 place-items-center rounded-xl ${c.tint}`}
-            >
-              <c.icon className="h-5 w-5" />
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{c.label}</p>
+                <div className="mt-2 font-display text-[28px] font-black leading-none text-white tracking-tight">
+                  {c.value}
+                </div>
+                {"hint" in c && c.hint && (
+                  <p className="mt-1 text-[11px] text-slate-600">{c.hint}</p>
+                )}
+              </div>
+              <div className={`grid h-9 w-9 shrink-0 place-items-center rounded-xl ${c.iconTint}`}>
+                <c.icon className="h-[18px] w-[18px]" />
+              </div>
             </div>
-            <div className="font-display text-2xl font-extrabold text-white">
-              {c.value}
+            <div className="mt-3 flex items-center gap-1 text-[11px] font-medium text-slate-600 transition-colors group-hover:text-brand">
+              View details <ArrowRight className="h-3 w-3 translate-x-0 opacity-0 transition-all duration-150 group-hover:translate-x-0.5 group-hover:opacity-100" />
             </div>
-            <p className="flex items-center gap-1 text-xs text-slate-400">
-              {c.label}
-              <ArrowRight className="h-3 w-3 opacity-0 transition group-hover:translate-x-0.5 group-hover:opacity-100" />
-            </p>
-            {"hint" in c && c.hint && (
-              <p className="mt-0.5 text-[11px] text-slate-600">{c.hint}</p>
-            )}
           </Link>
         ))}
       </div>
@@ -333,45 +355,45 @@ export default function AdminDashboard() {
               View all <ArrowRight className="h-3.5 w-3.5" />
             </Link>
           </div>
-          <div className="divide-y divide-white/5">
+          <div className="divide-y divide-white/[0.04]">
             {recent.length === 0 ? (
-              <p className="py-10 text-center text-sm text-slate-500">
-                No work orders yet
-              </p>
+              <div className="flex flex-col items-center justify-center gap-2 py-14">
+                <ClipboardList className="h-8 w-8 text-slate-700" />
+                <p className="text-sm text-slate-500">No work orders yet</p>
+              </div>
             ) : (
               recent.map((b) => (
                 <Link
                   key={b.id}
                   to="/admin/work-orders"
-                  className="flex items-start gap-4 px-5 py-3.5 transition hover:bg-white/[0.03]"
+                  className="group flex items-center gap-4 px-5 py-3.5 transition-colors hover:bg-white/[0.02]"
                 >
+                  {/* avatar */}
+                  <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-800 text-[11px] font-bold text-slate-300 ring-1 ring-white/5">
+                    {(b.customer?.name ?? "?").split(" ").map((x: string) => x[0]).slice(0, 2).join("")}
+                  </div>
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="truncate font-semibold text-slate-100">
+                      <span className="truncate text-sm font-semibold text-slate-100">
                         {b.customer?.name ?? "—"}
                       </span>
                       <StatusBadge status={b.status} />
                     </div>
-                    {b.address && (
-                      <p className="mt-0.5 flex items-center gap-1 truncate text-xs text-slate-500">
-                        <MapPin className="h-3 w-3 shrink-0" /> {b.address}
-                      </p>
-                    )}
-                    <p className="mt-0.5 flex items-center gap-1 truncate text-xs text-slate-500">
-                      <Wrench className="h-3 w-3 shrink-0" />
+                    <p className="mt-0.5 flex items-center gap-1.5 truncate text-[11px] text-slate-500">
+                      <Wrench className="h-3 w-3 shrink-0 text-slate-600" />
                       {b.rider?.name ? (
-                        <span className="text-slate-400">{b.rider.name}</span>
+                        <span>{b.rider.name}</span>
                       ) : (
-                        <span className="text-slate-600">Unassigned</span>
+                        <span className="text-slate-600 italic">Unassigned</span>
                       )}
                       <span className="text-slate-700">·</span>
-                      {fmtDate(b.scheduledAt)}
+                      <span>{fmtDate(b.scheduledAt)}</span>
                     </p>
                   </div>
-                  <div className="text-right">
-                    <div className="font-bold text-white">{money(b.price)}</div>
-                    <p className="text-[11px] text-slate-500">
-                      {b.title || b.service?.name}
+                  <div className="text-right shrink-0">
+                    <div className="text-sm font-bold text-white">{money(b.price)}</div>
+                    <p className="mt-0.5 text-[11px] text-slate-500 max-w-[100px] truncate">
+                      {b.title || b.service?.name || "—"}
                     </p>
                   </div>
                 </Link>
@@ -382,13 +404,16 @@ export default function AdminDashboard() {
 
         {/* fleet status */}
         <div className="nvc-card">
-          <div className="flex items-center justify-between border-b border-white/5 px-5 py-4">
-            <h2 className="font-bold text-white">Fleet status</h2>
+          <div className="flex items-center justify-between border-b border-white/[0.06] px-5 py-4">
+            <div>
+              <h2 className="text-sm font-bold text-white">Fleet status</h2>
+              <p className="text-[11px] text-slate-500 mt-0.5">Live technician availability</p>
+            </div>
             <Link
               to="/admin/fleet"
-              className="flex items-center gap-1 text-sm font-semibold text-cyan-glow"
+              className="flex items-center gap-1 rounded-lg border border-white/10 px-3 py-1.5 text-[11px] font-semibold text-slate-400 transition hover:border-brand/30 hover:text-brand"
             >
-              <MapPin className="h-3.5 w-3.5" /> Map
+              <MapPin className="h-3 w-3" /> Map
             </Link>
           </div>
           {/* sort / filter chips */}

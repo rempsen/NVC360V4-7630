@@ -49,8 +49,27 @@ export default function FleetPage() {
   });
 
   const bookingsQ = useQuery({
-    queryKey: ["fleet-bookings"],
-    queryFn: async () => (await api.bookings.$get()).json(),
+    queryKey: ["fleet-bookings", dateFrom, dateTo],
+    queryFn: async () => {
+      // Use the paginated search endpoint (batch-enriched, no N+1 per booking).
+      const from = new Date(`${dateFrom}T00:00:00`);
+      const to = new Date(`${dateTo}T23:59:59`);
+      const p = new URLSearchParams({
+        pageSize: "500",
+        page: "1",
+        sort: "scheduledAt",
+        dir: "desc",
+        schedFrom: String(from.getTime()),
+        schedTo: String(to.getTime()),
+      });
+      const res = await fetch(`/api/jobs/search?${p.toString()}`, {
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) return { bookings: [] };
+      const data = await res.json();
+      return { bookings: data.jobs ?? [] };
+    },
     refetchInterval: 15000,
   });
 
@@ -80,27 +99,21 @@ export default function FleetPage() {
       : null,
   }));
 
-  // job markers: within date range + has coords + not cancelled
+  // job markers: filter by date range + has coords + not cancelled
+  // bookingsQ now uses job-search which returns flat fields (customerName, technician, lat, lng)
   const allBookings = (bookingsQ.data as any)?.bookings ?? [];
-  const fromMs = new Date(`${dateFrom}T00:00:00`).getTime();
-  const toMs = new Date(`${dateTo}T23:59:59`).getTime();
   const jobs = allBookings
     .filter((b: any) => b.lat != null && b.lng != null && b.status !== "cancelled")
-    .filter((b: any) => {
-      if (!b.scheduledAt) return false;
-      const t = new Date(b.scheduledAt).getTime();
-      return t >= fromMs && t <= toMs;
-    })
     .map((b: any) => ({
       id: b.id,
-      title: b.title || b.service?.name || "Job",
+      title: b.title || b.service || "Job",
       status: b.status,
       color: STATUS_META[b.status]?.color ?? "#0ea5e9",
       lat: b.lat,
       lng: b.lng,
       address: b.address,
-      customerName: b.customer?.name ?? null,
-      techName: b.rider?.name ?? null,
+      customerName: b.customerName ?? null,
+      techName: b.technician !== "Unassigned" ? b.technician : null,
       scheduledAt: b.scheduledAt,
       priority: b.priority ?? null,
       total: b.total ?? null,
@@ -145,7 +158,7 @@ export default function FleetPage() {
           optimize.reset();
         }}
         onSelectJob={(id) => {
-          const b = allBookings.find((x: any) => x.id === id);
+          const b = allBookings.find((x: any) => x.id === id) ?? jobs.find((x: any) => x.id === id);
           if (b) setJobFor(b);
         }}
         className="h-full w-full"

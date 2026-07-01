@@ -211,6 +211,34 @@ export const trackRoutes = new Hono()
     rows.sort((a, z) => Number(a.createdAt) - Number(z.createdAt));
     return c.json({ messages: rows }, 200);
   })
+  // ── Public review (no auth) — customer rates job after completion ───────
+  // POST /api/track/:token/review { rating: 1-5, comment?: string }
+  .post("/:token/review", trackLimiter, async (c) => {
+    const token = c.req.param("token");
+    const b = await resolveByToken(token);
+    if (!b) return c.json({ message: "Not found" }, 404);
+    if (b.status !== "completed") return c.json({ message: "Job not yet complete" }, 400);
+    const { rating, comment } = await c.req.json();
+    const r = Math.max(1, Math.min(5, Math.round(Number(rating))));
+    const t = tdb(b.companyId);
+    // idempotent: only one review per booking from the tracking page
+    const existing = await t.selectOne(schema.reviews, eq(schema.reviews.bookingId, b.id));
+    if (existing) return c.json({ review: existing }, 200);
+    const [rev] = await t.insert(schema.reviews, {
+      bookingId: b.id,
+      customerId: b.customerId || null,
+      riderId: b.riderId || null,
+      rating: r,
+      comment: comment?.trim() ?? "",
+    });
+    // bump rider's average rating
+    if (b.riderId) {
+      const all = await t.select(schema.reviews, eq(schema.reviews.riderId, b.riderId));
+      const avg = all.reduce((s, x) => s + (x.rating || 0), 0) / all.length;
+      await t.update(schema.riders, { rating: Math.round(avg * 10) / 10 }, eq(schema.riders.id, b.riderId));
+    }
+    return c.json({ review: rev }, 201);
+  })
   // client posts a message from the public tracking page
   .post("/:token/messages", trackLimiter, async (c) => {
     const token = c.req.param("token");

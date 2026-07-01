@@ -19,12 +19,16 @@ import {
   Search,
   X,
   Ruler,
+  Camera,
+  ImageIcon,
+  Loader2,
 } from "lucide-react";
+import { apiHeaders } from "../lib/api";
 import { useWorkerNoun } from "../lib/use-brand";
 import { api } from "../lib/api";
 import { Modal, Field, inputCls, BtnGhost, BtnPrimary } from "./modal";
 import { PRIORITY_META, money } from "../lib/utils";
-import { RateModelEditor } from "./rate-model-editor";
+import { ChargesEditor, chargesSummary, type Charge } from "./charges-editor";
 import {
   EMPTY_RATE_MODEL,
   parseRateModel,
@@ -148,7 +152,7 @@ function CfCard({
   const upd = (patch: Partial<CustomField>) => onChange({ ...cf, ...patch });
 
   return (
-    <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+    <div className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.03] p-4">
       {/* header row */}
       <div className="flex items-center gap-2 mb-3">
         <GripVertical className="h-4 w-4 shrink-0 text-slate-600 cursor-grab" />
@@ -348,11 +352,17 @@ export function WorkOrderModal({
   const [lat, setLat] = useState<number | null>(null);
   const [lng, setLng] = useState<number | null>(null);
   const [riderId, setRiderId] = useState(defaultRiderId ?? "");
+  const [requiredSkillClass, setRequiredSkillClass] = useState("");
+  const [requiredSkills, setRequiredSkills] = useState<string[]>([]);
+  const [techFilter, setTechFilter] = useState("");
   const [notes, setNotes] = useState("");
+  const [staffNotes, setStaffNotes] = useState("");
   const [err, setErr] = useState("");
   const [region, setRegion] = useState("");
   const [rateModel, setRateModel] = useState<RateModel>({ ...EMPTY_RATE_MODEL });
   const [rateTouched, setRateTouched] = useState(false);
+  // unified charges (flat fee / hourly / per-unit — all committed via ChargesEditor)
+  const [charges, setCharges] = useState<Charge[]>([]);
   const [estMinutes, setEstMinutes] = useState("60");
   const [estKm, setEstKm] = useState("0");
 
@@ -397,6 +407,19 @@ export function WorkOrderModal({
     enabled: open,
   });
 
+  const skillClassesQ = useQuery({
+    queryKey: ["msg-skill-classes"],
+    queryFn: async () => { const r = await fetch("/api/messages/skill-classes"); return r.json(); },
+    enabled: open,
+  });
+  const skillsQ = useQuery({
+    queryKey: ["msg-skills"],
+    queryFn: async () => { const r = await fetch("/api/messages/skills"); return r.json(); },
+    enabled: open,
+  });
+  const allSkillClasses: string[] = (skillClassesQ.data?.skillClasses ?? []).map((s: any) => s.name);
+  const allSkills: string[] = (skillsQ.data?.skills ?? []).map((s: any) => s.name ?? s);
+
   const clients = useMemo(
     () => (users.data?.users ?? []).filter((u: any) => u.role === "customer"),
     [users.data],
@@ -430,45 +453,59 @@ export function WorkOrderModal({
     if (mins) setEstMinutes(String(mins));
   }, [templateId, serviceId, templates.data, services.data]);
 
-  // live price preview (includes flat-fee custom fields)
+  // live price preview
   const quote = useMemo(() => {
-    const { subtotal: base, items } = computeSubtotal(
-      rateModel,
-      Math.max(0, Number(estMinutes) || 0),
-      Math.max(0, Number(estKm) || 0),
-    );
     const cfExtra = customFields
       .filter((f) => f.type === "flat_fee" && f.amount)
       .reduce((s, f) => s + (f.amount ?? 0), 0);
+
+    // charges from ChargesEditor (flat fee + per-unit; hourly billed at job time)
+    const { clientTotal: chargesClientTotal, techTotal: chargesTechTotal } = chargesSummary(charges);
+    // only flat_fee and per_unit have known amounts; hourly = 0 until job done
+    const chargesKnown = charges
+      .filter((c) => c.type !== "hourly")
+      .reduce((s, c) => {
+        if (c.type === "flat_fee") return s + c.amount;
+        if (c.type === "per_unit") return s + c.qty * c.unitPrice;
+        return s;
+      }, 0);
+
+    // catalog line items (from service catalog)
     const catalogLines = lineItems.filter((l) => l.kind !== "unit");
-    const unitLines = lineItems.filter((l) => l.kind === "unit");
     const cat = sumLineItems(catalogLines);
-    const unit = sumLineItems(unitLines);
-    const li = sumLineItems(lineItems);
-    const subtotal = Math.round((base + cfExtra + li.price) * 100) / 100;
+
+    const subtotal = Math.round((chargesKnown + cfExtra + cat.price) * 100) / 100;
     const tax = lookupTax(region);
     const taxRate = tax?.rate ?? 0;
-    // service/labor base + cf are taxable; line items respect their own taxable flag
-    const taxableBase = base + cfExtra + li.taxablePrice;
+    const taxableBase = chargesKnown + cfExtra + cat.taxablePrice;
     const taxAmount = Math.round(taxableBase * taxRate) / 100;
     const total = Math.round((subtotal + taxAmount) * 100) / 100;
-    // unit lines: charge = price, tech pay = cost
-    const unitCharge = unit.price;
-    const unitPay = unit.cost;
+
+    // build display items from charges
+    const chargeItems = charges.map((c) => {
+      if (c.type === "flat_fee") return { label: c.label || "Flat fee", amount: c.amount };
+      if (c.type === "hourly") return { label: c.label || "Hourly", amount: null };
+      return {
+        label: `${c.qty} ${c.unit}${c.name ? ` · ${c.name}` : ""} × ${c.unitPrice.toFixed(2)}`,
+        amount: c.qty * c.unitPrice,
+      };
+    });
+
     return {
       subtotal,
-      items,
+      chargeItems,
+      chargesKnown,
+      chargesTechTotal,
       cfExtra,
       lineItemsPrice: cat.price,
       lineItemsCost: cat.cost,
       lineItemsMargin: cat.margin,
-      unitCharge,
-      unitPay,
       taxLabel: tax?.label ?? "No tax region",
       taxAmount,
       total,
+      hasHourly: charges.some((c) => c.type === "hourly"),
     };
-  }, [rateModel, estMinutes, estKm, region, customFields, lineItems]);
+  }, [charges, region, customFields, lineItems]);
 
   // populate from editBooking
   useEffect(() => {
@@ -486,14 +523,31 @@ export function WorkOrderModal({
       setLat(b.lat ?? null);
       setLng(b.lng ?? null);
       setRiderId(b.riderId ?? "");
+      setRequiredSkillClass((b as any).requiredSkillClass ?? "");
+      setRequiredSkills((b as any).requiredSkills ? (b as any).requiredSkills.split(",").filter(Boolean) : []);
       setNotes(b.notes ?? "");
+      setStaffNotes((b as any).staffNotes ?? "");
       setRegion(b.region ?? "");
       const rm = parseRateModel(b.rateModel);
       if (rm) { setRateModel(rm); setRateTouched(true); }
       try {
         const li = typeof b.lineItems === "string" ? JSON.parse(b.lineItems || "[]") : b.lineItems;
-        setLineItems(Array.isArray(li) ? li : []);
-      } catch { setLineItems([]); }
+        const liArr: LineItem[] = Array.isArray(li) ? li : [];
+        // restore unit-kind line items as per_unit charges so they show in ChargesEditor
+        const restoredCharges: Charge[] = liArr
+          .filter((l) => l.kind === "unit")
+          .map((l) => ({
+            id: l.itemId || Math.random().toString(36).slice(2),
+            type: "per_unit" as const,
+            name: l.name || "",
+            unit: l.unit || "each",
+            qty: l.qty || 1,
+            unitPrice: l.unitPrice || 0,
+            unitPayRate: l.unitCost || 0,
+          }));
+        setLineItems(liArr.filter((l) => l.kind !== "unit"));
+        setCharges(restoredCharges);
+      } catch { setLineItems([]); setCharges([]); }
       // restore custom fields if any
       try {
         const fd = JSON.parse(b.fieldData || "{}");
@@ -503,6 +557,9 @@ export function WorkOrderModal({
     } else {
       setScheduledAt(toLocalInput(defaultDate));
       setRiderId(defaultRiderId ?? "");
+      setRequiredSkillClass("");
+      setRequiredSkills([]);
+      setTechFilter("");
       setCustomFields([]);
       setLineItems([]);
     }
@@ -511,6 +568,43 @@ export function WorkOrderModal({
   // ── mutations ──────────────────────────────────────────────────────────────
 
   function buildPayload() {
+    // Convert ChargesEditor charges into LineItem records for DB persistence.
+    // flat_fee → kind:"flat_fee_line", hourly → stored in rateModel, per_unit → kind:"unit"
+    const chargeLineItems: LineItem[] = charges.map((c) => {
+      if (c.type === "per_unit") {
+        return buildUnitLineItem({
+          name: c.name || "Line item",
+          unit: c.unit || "each",
+          qty: c.qty,
+          unitPrice: c.unitPrice,
+          unitPayRate: c.unitPayRate,
+          taxable: true,
+        });
+      }
+      // flat_fee stored as a unit line with qty=1 so it shows on invoices
+      return buildUnitLineItem({
+        name: c.type === "flat_fee" ? (c.label || "Flat fee") : (c.label || "Hourly charge"),
+        unit: "job",
+        qty: 1,
+        unitPrice: c.type === "flat_fee" ? c.amount : 0,
+        unitPayRate: c.type === "flat_fee" ? c.techPay : 0,
+        taxable: true,
+      });
+    });
+
+    // Build rateModel from hourly charges (use first hourly charge if present)
+    const hourlyCharge = charges.find((c) => c.type === "hourly");
+    const effectiveRateModel: RateModel = hourlyCharge
+      ? {
+          ...EMPTY_RATE_MODEL,
+          freeMinutes: hourlyCharge.freeMinutes,
+          firstHourRate: hourlyCharge.firstHourRate,
+          additionalHourRate: hourlyCharge.additionalHourRate,
+        }
+      : rateModel;
+
+    const allLineItems = [...lineItems, ...chargeLineItems];
+
     return {
       customerId,
       serviceId,
@@ -522,11 +616,14 @@ export function WorkOrderModal({
       lat: lat ?? undefined,
       lng: lng ?? undefined,
       notes,
+      staffNotes,
       riderId: riderId || undefined,
       region: region || undefined,
-      rateModel,
-      lineItems,
+      rateModel: effectiveRateModel,
+      lineItems: allLineItems,
       fieldData: { _customFields: customFields },
+      requiredSkillClass: requiredSkillClass || "",
+      requiredSkills: requiredSkills.join(","),
     };
   }
 
@@ -580,8 +677,9 @@ export function WorkOrderModal({
   function reset() {
     setCustomerId(""); setServiceId(""); setTemplateId(""); setTitle("");
     setPriority("normal"); setAddress(""); setLat(null); setLng(null);
-    setRiderId(""); setNotes(""); setRegion("");
-    setRateModel({ ...EMPTY_RATE_MODEL }); setRateTouched(false);
+    setRiderId(""); setRequiredSkillClass(""); setRequiredSkills([]); setTechFilter("");
+    setNotes(""); setStaffNotes(""); setRegion("");
+    setRateModel({ ...EMPTY_RATE_MODEL }); setRateTouched(false); setCharges([]);
     setEstMinutes("60"); setEstKm("0"); setCustomFields([]); setLineItems([]);
   }
 
@@ -609,33 +707,6 @@ export function WorkOrderModal({
   }
   function removeLine(itemId: string) {
     setLineItems((prev) => prev.filter((p) => p.itemId !== itemId));
-  }
-
-  // ── ad-hoc per-unit lines (charge + tech pay) ──
-  function addUnitLine() {
-    setLineItems((prev) => [
-      ...prev,
-      buildUnitLineItem({ name: "", unit: "sq/ft", qty: 1, unitPrice: 0, unitPayRate: 0 }),
-    ]);
-  }
-  function updateUnitLine(
-    itemId: string,
-    patch: Partial<{ name: string; unit: string; qty: number; unitPrice: number; unitPayRate: number; taxable: boolean }>,
-  ) {
-    setLineItems((prev) =>
-      prev.map((p) => {
-        if (p.itemId !== itemId || p.kind !== "unit") return p;
-        return buildUnitLineItem({
-          itemId: p.itemId,
-          name: patch.name ?? p.name,
-          unit: patch.unit ?? p.unit,
-          qty: patch.qty ?? p.qty,
-          unitPrice: patch.unitPrice ?? p.unitPrice,
-          unitPayRate: patch.unitPayRate ?? p.unitCost,
-          taxable: patch.taxable ?? p.taxable,
-        });
-      }),
-    );
   }
 
   function submit() {
@@ -742,13 +813,112 @@ export function WorkOrderModal({
           </Field>
         </div>
 
-        <Field label={`Assign ${noun}`} hint="Optional — auto-dispatches">
-          <select aria-label={`Assign ${noun}`} value={riderId} onChange={(e) => setRiderId(e.target.value)} className={inputCls}>
-            <option value="">Leave unassigned</option>
-            {(riders.data?.riders ?? []).map((r: any) => (
-              <option key={r.id} value={r.id}>{r.name} {r.status ? `(${r.status})` : ""}</option>
+        {/* ── Skill class + skill tags ────────────────────────────────── */}
+        <Field label="Required skill class" hint="Filter tech assignment to matching skill class">
+          <div className="flex flex-wrap gap-1.5">
+            <button
+              type="button"
+              onClick={() => setRequiredSkillClass("")}
+              className={`rounded-full px-2.5 py-0.5 text-xs font-semibold transition ${requiredSkillClass === "" ? "bg-brand text-white" : "bg-white/10 text-slate-300 hover:bg-white/15"}`}
+            >
+              Any
+            </button>
+            {allSkillClasses.map((sc) => (
+              <button
+                key={sc}
+                type="button"
+                onClick={() => setRequiredSkillClass(sc === requiredSkillClass ? "" : sc)}
+                className={`rounded-full px-2.5 py-0.5 text-xs font-semibold transition ${requiredSkillClass === sc ? "bg-brand text-white" : "bg-white/10 text-slate-300 hover:bg-white/15"}`}
+              >
+                {sc}
+              </button>
             ))}
-          </select>
+          </div>
+        </Field>
+
+        {allSkills.length > 0 && (
+          <Field label="Required skills" hint="Tag specific skills needed for this job">
+            <div className="flex flex-wrap gap-1.5">
+              {allSkills.map((sk) => {
+                const active = requiredSkills.includes(sk);
+                return (
+                  <button
+                    key={sk}
+                    type="button"
+                    onClick={() => setRequiredSkills((prev) => active ? prev.filter((x) => x !== sk) : [...prev, sk])}
+                    className={`rounded-full px-2.5 py-0.5 text-xs font-semibold transition ${active ? "bg-cyan-glow/20 text-cyan-glow ring-1 ring-cyan-glow/40" : "bg-white/10 text-slate-300 hover:bg-white/15"}`}
+                  >
+                    {sk}
+                  </button>
+                );
+              })}
+            </div>
+          </Field>
+        )}
+
+        {/* ── Tech assignment (smart filtered) ───────────────────────── */}
+        <Field label={`Assign ${noun}`} hint="Optional — auto-dispatches">
+          {(() => {
+            const allRiders: any[] = riders.data?.riders ?? [];
+            const filterLower = techFilter.toLowerCase();
+            const filtered = allRiders.filter((r) => {
+              const nameMatch = !filterLower || r.name?.toLowerCase().includes(filterLower);
+              const classMatch = !requiredSkillClass || r.skillClass === requiredSkillClass;
+              return nameMatch && classMatch;
+            });
+            const selected = allRiders.find((r) => r.id === riderId);
+            return (
+              <div className="space-y-1.5">
+                {/* search */}
+                <input
+                  type="text"
+                  placeholder={`Search ${noun.toLowerCase()}s…`}
+                  value={techFilter}
+                  onChange={(e) => setTechFilter(e.target.value)}
+                  className={inputCls + " text-sm"}
+                />
+                {/* selected badge */}
+                {selected && (
+                  <div className="flex items-center gap-2 rounded-lg border border-brand/30 bg-brand/10 px-2.5 py-1.5 text-xs">
+                    <span className="font-semibold text-slate-200">{selected.name}</span>
+                    {selected.skillClass && <span className="ml-1 rounded-full bg-brand/20 px-1.5 py-0.5 text-[10px] text-brand">{selected.skillClass}</span>}
+                    <button type="button" onClick={() => setRiderId("")} className="ml-auto text-slate-400 hover:text-white">✕</button>
+                  </div>
+                )}
+                {/* list */}
+                <div className="max-h-44 overflow-y-auto rounded-lg border border-white/10 bg-ink-3/60">
+                  <button
+                    type="button"
+                    onClick={() => setRiderId("")}
+                    className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs hover:bg-white/5 ${!riderId ? "bg-white/5" : ""}`}
+                  >
+                    <span className="text-slate-400 italic">Leave unassigned</span>
+                  </button>
+                  {filtered.length === 0 && (
+                    <p className="px-3 py-2 text-xs text-slate-500">No {noun.toLowerCase()}s match{requiredSkillClass ? ` skill class "${requiredSkillClass}"` : ""}.</p>
+                  )}
+                  {filtered.map((r) => {
+                    const isMatch = !requiredSkillClass || r.skillClass === requiredSkillClass;
+                    return (
+                      <button
+                        key={r.id}
+                        type="button"
+                        onClick={() => setRiderId(r.id)}
+                        className={`flex w-full items-center gap-2 px-3 py-2 text-left text-xs transition hover:bg-white/5 ${riderId === r.id ? "bg-brand/10" : ""}`}
+                      >
+                        <span className={`h-2 w-2 shrink-0 rounded-full ${r.status === "available" ? "bg-green-400" : r.status === "busy" ? "bg-amber-400" : "bg-slate-600"}`} />
+                        <span className="font-medium text-slate-200">{r.name}</span>
+                        {r.skillClass && (
+                          <span className={`ml-1 rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${isMatch ? "bg-brand/20 text-brand" : "bg-white/10 text-slate-400"}`}>{r.skillClass}</span>
+                        )}
+                        <span className="ml-auto capitalize text-[10px] text-slate-500">{r.status}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
         </Field>
 
         <Field label="Tax region">
@@ -782,11 +952,29 @@ export function WorkOrderModal({
         </Field>
 
         <div className="sm:col-span-2">
-          <Field label="Notes">
+          <Field label="Notes (customer-facing)">
             <textarea aria-label="Notes" value={notes} onChange={(e) => setNotes(e.target.value)}
-              rows={3} placeholder="Additional details…" className={inputCls} />
+              rows={3} placeholder="Additional details visible to the customer…" className={inputCls} />
           </Field>
         </div>
+
+        <div className="sm:col-span-2">
+          <Field label="Staff Notes to Driver (access codes, special instructions — not shown to customer)">
+            <textarea aria-label="Staff Notes" value={staffNotes} onChange={(e) => setStaffNotes(e.target.value)}
+              rows={3} placeholder="E.g. Access code 4521. Ring bell twice. Park on side street…" className={`${inputCls} border-amber-500/40 focus:border-amber-500`} />
+          </Field>
+        </div>
+
+        {/* Driver Field Notes (read-only — written by tech on-site) */}
+        {!!(editBooking as any)?.driverNotes && (
+          <div className="sm:col-span-2">
+            <Field label="Driver Field Notes (written on-site by technician)">
+              <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/5 px-3 py-3 text-sm text-emerald-300 whitespace-pre-wrap leading-relaxed">
+                {(editBooking as any).driverNotes}
+              </div>
+            </Field>
+          </div>
+        )}
 
         {/* ── Catalog line items ── */}
         <div className="sm:col-span-2">
@@ -800,23 +988,9 @@ export function WorkOrderModal({
           />
         </div>
 
-        {/* ── Per-unit line items (charge + tech pay) ── */}
+        {/* ── Charges (flat fee / hourly / per-unit) ── */}
         <div className="sm:col-span-2">
-          <UnitLineItems
-            lines={lineItems.filter((l) => l.kind === "unit")}
-            workerNoun={noun}
-            onAdd={addUnitLine}
-            onChange={updateUnitLine}
-            onRemove={removeLine}
-          />
-        </div>
-
-        {/* ── Rate model ── */}
-        <div className="sm:col-span-2">
-          <RateModelEditor
-            value={rateModel}
-            onChange={(v) => { setRateModel(v); setRateTouched(true); }}
-          />
+          <ChargesEditor charges={charges} onChange={setCharges} />
         </div>
 
         {/* ── Price preview ── */}
@@ -825,14 +999,15 @@ export function WorkOrderModal({
             Price preview
           </div>
           <div className="space-y-1 text-sm">
-            {quote.items.length === 0 && !quote.cfExtra && !quote.lineItemsPrice && !quote.unitCharge && !quote.unitPay ? (
-              <p className="text-slate-500">Pick a service or add fields to see pricing.</p>
+            {charges.length === 0 && !quote.cfExtra && !quote.lineItemsPrice ? (
+              <p className="text-slate-500">Add a charge above to see pricing.</p>
             ) : (
               <>
-                {quote.items.map((it: any, i: number) => (
+                {/* charges */}
+                {quote.chargeItems.map((it: any, i: number) => (
                   <div key={i} className="flex justify-between text-slate-300">
                     <span>{it.label}</span>
-                    <span>${it.amount.toFixed(2)}</span>
+                    <span>{it.amount !== null ? `${it.amount.toFixed(2)}` : <span className="text-slate-500 text-xs">billed at job time</span>}</span>
                   </div>
                 ))}
                 {quote.cfExtra > 0 && (
@@ -852,13 +1027,7 @@ export function WorkOrderModal({
                     <span>+${quote.lineItemsPrice.toFixed(2)}</span>
                   </div>
                 )}
-                {quote.unitCharge > 0 && (
-                  <div className="flex justify-between text-slate-300">
-                    <span>Per-unit line items</span>
-                    <span>+${quote.unitCharge.toFixed(2)}</span>
-                  </div>
-                )}
-                {(quote.items.length > 0 || quote.cfExtra > 0 || quote.lineItemsPrice > 0 || quote.unitCharge > 0) && (
+                {(quote.chargesKnown > 0 || quote.cfExtra > 0 || quote.lineItemsPrice > 0) && (
                   <>
                     <div className="flex justify-between border-t border-white/10 pt-1 text-slate-400">
                       <span>Subtotal</span><span>${quote.subtotal.toFixed(2)}</span>
@@ -869,10 +1038,13 @@ export function WorkOrderModal({
                     <div className="flex justify-between pt-1 text-base font-semibold text-white">
                       <span>Total</span><span>${quote.total.toFixed(2)}</span>
                     </div>
-                    {quote.unitPay > 0 && (
+                    {quote.hasHourly && (
+                      <p className="text-[11px] text-slate-500 pt-1">* Hourly charges billed at actual job time</p>
+                    )}
+                    {quote.chargesTechTotal > 0 && (
                       <div className="mt-1 flex justify-between border-t border-white/10 pt-1.5 text-amber-400">
-                        <span>{noun} pay (per-unit lines)</span>
-                        <span>${quote.unitPay.toFixed(2)}</span>
+                        <span>{noun} pay</span>
+                        <span>${quote.chargesTechTotal.toFixed(2)}</span>
                       </div>
                     )}
                   </>
@@ -921,6 +1093,13 @@ export function WorkOrderModal({
         </div>
       </div>
 
+      {/* ── Job Photos (only visible when editing an existing booking) ── */}
+      {isEdit && editBooking?.id && (
+        <div className="mt-4">
+          <JobPhotosPanel bookingId={editBooking.id} />
+        </div>
+      )}
+
       {err && (
         <p className="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{err}</p>
       )}
@@ -928,9 +1107,133 @@ export function WorkOrderModal({
   );
 }
 
+// ─── Job Photos Panel ────────────────────────────────────────────────────────
+
+function JobPhotosPanel({ bookingId }: { bookingId: string }) {
+  const qc = useQueryClient();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [lightbox, setLightbox] = useState<string | null>(null);
+
+  const photos = useQuery({
+    queryKey: ["job-photos", bookingId],
+    queryFn: async () => {
+      const res = await fetch(`/api/bookings/${bookingId}/photos`, { headers: apiHeaders() });
+      const data = await res.json();
+      return (data.photos ?? []) as Array<{ id: string; url: string; caption?: string; createdAt?: string }>;
+    },
+    refetchInterval: 15000, // poll every 15s so new driver photos appear
+  });
+
+  async function handleUpload(file: File) {
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("caption", "");
+      await fetch(`/api/bookings/${bookingId}/photos`, {
+        method: "POST",
+        headers: apiHeaders(),
+        body: fd,
+      });
+      await qc.invalidateQueries({ queryKey: ["job-photos", bookingId] });
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  const list = photos.data ?? [];
+
+  return (
+    <div>
+      <div className="mb-2 flex items-center justify-between">
+        <div>
+          <p className="text-sm font-semibold text-white flex items-center gap-2">
+            <Camera className="h-4 w-4 text-brand" />
+            Job Photos
+            {list.length > 0 && (
+              <span className="ml-1 rounded-full bg-brand/20 px-2 py-0.5 text-[10px] font-bold text-brand">
+                {list.length}
+              </span>
+            )}
+          </p>
+          <p className="text-xs text-slate-500">Photos uploaded by the technician in the field</p>
+        </div>
+        <label className="flex cursor-pointer items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-semibold text-slate-300 hover:bg-white/10">
+          {uploading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Camera className="h-3.5 w-3.5" />}
+          {uploading ? "Uploading…" : "Add photo"}
+          <input
+            ref={fileRef}
+            type="file"
+            accept="image/*"
+            className="sr-only"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUpload(f); e.target.value = ""; }}
+            disabled={uploading}
+          />
+        </label>
+      </div>
+
+      {list.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-white/10 py-6 text-center text-sm text-slate-600">
+          <ImageIcon className="mx-auto mb-2 h-6 w-6 opacity-40" />
+          No photos yet — technician photos will appear here automatically.
+        </div>
+      ) : (
+        <div className="grid grid-cols-4 gap-2 sm:grid-cols-6">
+          {list.map((p) => (
+            <button
+              key={p.id}
+              type="button"
+              onClick={() => setLightbox(p.url)}
+              className="group relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-ink-3 hover:border-brand/40"
+            >
+              <img
+                src={p.url}
+                alt={p.caption || "Job photo"}
+                className="h-full w-full object-cover transition-transform group-hover:scale-105"
+              />
+              {p.caption && (
+                <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-1 py-0.5 text-[9px] text-white truncate">
+                  {p.caption}
+                </div>
+              )}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Lightbox */}
+      {lightbox && (
+        <div
+          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 p-4 backdrop-blur-sm"
+          onClick={() => setLightbox(null)}
+        >
+          <button
+            type="button"
+            onClick={() => setLightbox(null)}
+            className="absolute right-4 top-4 grid h-9 w-9 place-items-center rounded-full bg-white/10 text-white hover:bg-white/20"
+          >
+            <X className="h-5 w-5" />
+          </button>
+          <img
+            src={lightbox}
+            alt="Job photo"
+            className="max-h-[90vh] max-w-[90vw] rounded-xl object-contain shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Catalog line-item picker ────────────────────────────────────────────────
 
-const KIND_ICON = { service: Wrench, product: Package, assembly: Layers } as const;
+const KIND_ICON: Record<string, React.ComponentType<{ className?: string }>> = {
+  service: Wrench,
+  product: Package,
+  assembly: Layers,
+};
 
 function CatalogLineItems({
   items,
@@ -962,7 +1265,7 @@ function CatalogLineItems({
   });
 
   return (
-    <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+    <div className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.03] p-4">
       <div className="mb-3 flex items-center justify-between">
         <div>
           <p className="text-sm font-semibold text-white">Products & materials</p>
@@ -993,7 +1296,7 @@ function CatalogLineItems({
           </div>
           <div className="max-h-52 space-y-1 overflow-y-auto">
             {filtered.map((i) => {
-              const Icon = KIND_ICON[i.kind];
+              const Icon = KIND_ICON[i.kind] ?? Package;
               const price = itemUnitPrice(i, lookup);
               return (
                 <button
@@ -1115,7 +1418,7 @@ function UnitLineItems({
   const totalPay = lines.reduce((s, l) => s + (l.cost || 0), 0);
 
   return (
-    <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+    <div className="overflow-hidden rounded-xl border border-white/10 bg-white/[0.03] p-4">
       <div className="mb-3 flex items-center justify-between">
         <div>
           <p className="flex items-center gap-1.5 text-sm font-semibold text-white">
@@ -1140,7 +1443,7 @@ function UnitLineItems({
       ) : (
         <div className="space-y-2">
           {/* header (sm+) */}
-          <div className="hidden gap-2 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500 sm:grid sm:grid-cols-[1fr_88px_64px_92px_92px_84px_28px]">
+          <div className="hidden gap-1.5 px-1 text-[10px] font-semibold uppercase tracking-wide text-slate-500 sm:grid sm:grid-cols-[1fr_80px_52px_82px_82px_72px_24px]">
             <span>Description</span>
             <span>Unit</span>
             <span className="text-right">Qty</span>
@@ -1157,7 +1460,7 @@ function UnitLineItems({
             return (
               <div
                 key={l.itemId}
-                className="grid grid-cols-2 gap-2 rounded-lg bg-white/5 p-2 sm:grid-cols-[1fr_88px_64px_92px_92px_84px_28px] sm:items-center sm:bg-transparent sm:p-1"
+                className="grid grid-cols-2 gap-1.5 rounded-lg bg-white/5 p-2 sm:grid-cols-[1fr_80px_52px_82px_82px_72px_24px] sm:items-center sm:bg-transparent sm:p-1"
               >
                 {/* description */}
                 <input

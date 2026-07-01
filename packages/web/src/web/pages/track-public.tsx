@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute } from "wouter";
 import { api } from "../lib/api";
@@ -19,17 +19,148 @@ import {
   CheckCircle2,
   Mail,
   Building2,
+  AlertTriangle,
+  Navigation,
+  Wrench,
+  CalendarCheck,
+  UserCheck,
 } from "lucide-react";
 
+// ─── Status stepper ───────────────────────────────────────────────────────────
+const STEPS = [
+  { key: "pending",     label: "Confirmed",  Icon: CalendarCheck },
+  { key: "assigned",   label: "Assigned",   Icon: UserCheck },
+  { key: "enroute",    label: "En Route",   Icon: Navigation },
+  { key: "arrived",    label: "Arrived",    Icon: MapPin },
+  { key: "in_progress",label: "In Progress",Icon: Wrench },
+  { key: "completed",  label: "Complete",   Icon: CheckCircle2 },
+] as const;
+
+// order index for each status (higher = further along)
+const STATUS_ORDER: Record<string, number> = {
+  pending: 0, assigned: 1, enroute: 2, arrived: 3, in_progress: 4, completed: 5,
+};
+
+function StatusStepper({ status }: { status: string }) {
+  const current = STATUS_ORDER[status] ?? 0;
+  // cancelled gets a special display — skip the stepper
+  if (status === "cancelled") return null;
+
+  return (
+    <div className="nvc-card p-4">
+      <div className="relative flex items-start justify-between">
+        {/* connecting line */}
+        <div className="absolute left-0 right-0 top-[18px] mx-[18px] h-0.5 bg-white/10" />
+        <div
+          className="absolute left-0 top-[18px] h-0.5 bg-cyan-glow transition-all duration-700"
+          style={{
+            marginLeft: 18,
+            width: current === 0
+              ? "0%"
+              : `calc(${(current / (STEPS.length - 1)) * 100}% - ${current === STEPS.length - 1 ? 36 : 18}px)`,
+          }}
+        />
+        {STEPS.map((step, i) => {
+          const done = i < current;
+          const active = i === current;
+          return (
+            <div key={step.key} className="relative flex flex-col items-center gap-1.5" style={{ flex: 1 }}>
+              <span
+                className={`relative z-10 flex h-9 w-9 items-center justify-center rounded-full border-2 transition-all duration-500 ${
+                  done
+                    ? "border-cyan-glow bg-cyan-glow text-ink"
+                    : active
+                    ? "border-cyan-glow bg-ink text-cyan-glow shadow-[0_0_12px_rgba(14,165,233,0.5)]"
+                    : "border-white/15 bg-ink text-slate-600"
+                }`}
+              >
+                {done ? (
+                  <CheckCircle2 className="h-4 w-4" />
+                ) : (
+                  <step.Icon className="h-4 w-4" />
+                )}
+                {active && (
+                  <span className="absolute inset-0 animate-ping rounded-full border-2 border-cyan-glow opacity-40" />
+                )}
+              </span>
+              <span
+                className={`text-center text-[10px] font-semibold leading-tight ${
+                  active ? "text-cyan-glow" : done ? "text-slate-400" : "text-slate-600"
+                }`}
+              >
+                {step.label}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Live ETA countdown ───────────────────────────────────────────────────────
+// Takes the server-supplied etaMins and counts down second-by-second.
+// Resets whenever etaMins changes (new server snapshot).
+function useLiveEta(etaMins: number | null | undefined) {
+  const [secsLeft, setSecsLeft] = useState<number | null>(null);
+  const baseRef = useRef<{ at: number; secs: number } | null>(null);
+
+  useEffect(() => {
+    if (etaMins == null) { setSecsLeft(null); baseRef.current = null; return; }
+    const secs = Math.round(etaMins * 60);
+    baseRef.current = { at: Date.now(), secs };
+    setSecsLeft(secs);
+  }, [etaMins]);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (!baseRef.current) return;
+      const elapsed = Math.floor((Date.now() - baseRef.current.at) / 1000);
+      const remaining = Math.max(0, baseRef.current.secs - elapsed);
+      setSecsLeft(remaining);
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (secsLeft == null) return null;
+  const mins = Math.floor(secsLeft / 60);
+  const secs = secsLeft % 60;
+  if (mins >= 2) return `${mins} min`;
+  if (secsLeft > 0) return `${mins}:${String(secs).padStart(2, "0")}`;
+  return "Arriving now";
+}
+
+// ─── Proximity alert banner ───────────────────────────────────────────────────
+// Haversine distance between two lat/lng points, returns metres.
+function haversineM(
+  lat1: number, lng1: number, lat2: number, lng2: number,
+): number {
+  const R = 6_371_000;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// ─── Main component ───────────────────────────────────────────────────────────
 export default function TrackPublic() {
   const [, params] = useRoute("/t/:token");
   const token = params?.token ?? "";
   const qc = useQueryClient();
   const [draft, setDraft] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
-
-  // SSE-connected? then poll only as a slow safety net; else poll at 2.5s.
   const [sseUp, setSseUp] = useState(false);
+  const alertedRef = useRef(false);
+  const [showProximityAlert, setShowProximityAlert] = useState(false);
+  // Review state
+  const [reviewRating, setReviewRating] = useState(0);
+  const [reviewHover, setReviewHover] = useState(0);
+  const [reviewComment, setReviewComment] = useState("");
+  const [reviewSubmitted, setReviewSubmitted] = useState(false);
 
   const track = useQuery({
     queryKey: ["track", token],
@@ -39,15 +170,12 @@ export default function TrackPublic() {
     enabled: !!token,
   });
 
-  // Live updates via Server-Sent Events — pushes a fresh snapshot on every
-  // driver ping / status change. Falls back to polling automatically if the
-  // stream errors or isn't reachable (the refetchInterval above).
+  // SSE — pushes fresh snapshot on every driver ping / status change
   useEffect(() => {
     if (!token) return;
     let es: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
-
     const connect = () => {
       if (stopped) return;
       es = new EventSource(`/api/track/${token}/stream`);
@@ -56,19 +184,15 @@ export default function TrackPublic() {
           const snap = JSON.parse((ev as MessageEvent).data);
           qc.setQueryData(["track", token], snap);
           setSseUp(true);
-        } catch {
-          /* ignore malformed frame */
-        }
+        } catch { /* ignore */ }
       });
       es.onerror = () => {
         setSseUp(false);
         es?.close();
-        // reconnect with backoff; polling covers the gap meanwhile
         if (!stopped) retry = setTimeout(connect, 4000);
       };
     };
     connect();
-
     return () => {
       stopped = true;
       if (retry) clearTimeout(retry);
@@ -86,14 +210,29 @@ export default function TrackPublic() {
 
   const send = useMutation({
     mutationFn: async (body: string) =>
-      (await api.track[":token"].messages.$post({
-        param: { token },
-        json: { body, senderName: "Client" },
-      })).json(),
+      (
+        await api.track[":token"].messages.$post({
+          param: { token },
+          json: { body, senderName: "Client" },
+        })
+      ).json(),
     onSuccess: () => {
       setDraft("");
       qc.invalidateQueries({ queryKey: ["track-msgs", token] });
     },
+  });
+
+  const submitReview = useMutation({
+    mutationFn: async ({ rating, comment }: { rating: number; comment: string }) => {
+      const res = await fetch(`/api/track/${token}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rating, comment }),
+      });
+      if (!res.ok) throw new Error("Failed");
+      return res.json();
+    },
+    onSuccess: () => setReviewSubmitted(true),
   });
 
   const msgs = (messages.data as any)?.messages ?? [];
@@ -101,6 +240,26 @@ export default function TrackPublic() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [msgs.length]);
 
+  const data = track.data as any;
+
+  // proximity check — fire when driver enters 500m radius, once per session
+  useEffect(() => {
+    if (alertedRef.current || !data) return;
+    const tl = data.techLocation;
+    const dest = data.destination;
+    if (!tl?.lat || !dest?.lat) return;
+    const distM = haversineM(tl.lat, tl.lng, dest.lat, dest.lng);
+    if (distM <= 500 && ["enroute", "assigned"].includes(data.status)) {
+      alertedRef.current = true;
+      setShowProximityAlert(true);
+      // auto-dismiss after 8s
+      setTimeout(() => setShowProximityAlert(false), 8000);
+    }
+  }, [data]);
+
+  const liveEta = useLiveEta(data?.etaMins);
+
+  // ── loading / not found ──
   if (track.isLoading)
     return (
       <div className="grid min-h-screen place-items-center bg-ink text-slate-400">
@@ -108,7 +267,6 @@ export default function TrackPublic() {
       </div>
     );
 
-  const data = track.data as any;
   if (!data || data.message === "Not found")
     return (
       <div className="grid min-h-screen place-items-center bg-ink px-6 text-center">
@@ -121,16 +279,22 @@ export default function TrackPublic() {
       </div>
     );
 
-  const meta = STATUS_META[data.status] ?? { label: data.status, color: "#64748b" };
-  // Once a job reaches a terminal state the live map / ETA / route are no
-  // longer relevant — we hide them and show a clean completion summary with
-  // the company + technician details and a way to reach the company.
-  const isDone = data.status === "completed" || data.status === "cancelled";
-  const company = data.company as { name?: string; email?: string; phone?: string } | null;
+  const meta =
+    STATUS_META[data.status] ?? { label: data.status, color: "#64748b" };
+  const isDone =
+    data.status === "completed" || data.status === "cancelled";
+  const company = data.company as {
+    name?: string;
+    email?: string;
+    phone?: string;
+  } | null;
   const workerNoun: string = data.workerNoun || "Technician";
+  const isEnroute = data.status === "enroute" || data.status === "assigned";
+  const isArrived = data.status === "arrived" || data.status === "in_progress";
 
   return (
     <div className="nvc-grid-bg min-h-screen bg-ink text-slate-200">
+      {/* ── Header ── */}
       <header className="border-b border-white/5 bg-ink-2/80 backdrop-blur">
         <div className="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
           <Logo light />
@@ -141,7 +305,26 @@ export default function TrackPublic() {
         </div>
       </header>
 
+      {/* ── Proximity alert banner ── */}
+      {showProximityAlert && (
+        <div className="animate-in slide-in-from-top border-b border-amber-warn/30 bg-amber-warn/10 px-4 py-3">
+          <div className="mx-auto flex max-w-5xl items-center gap-3">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-warn" />
+            <p className="text-sm font-semibold text-amber-warn">
+              Your {workerNoun.toLowerCase()} is less than 5 minutes away — please be ready!
+            </p>
+            <button
+              onClick={() => setShowProximityAlert(false)}
+              className="ml-auto text-slate-400 hover:text-white"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="mx-auto max-w-5xl px-4 py-6">
+        {/* ── Title + status pill ── */}
         <div className="mb-4">
           <h1 className="font-display text-xl font-bold text-white">
             {data.title}
@@ -158,6 +341,9 @@ export default function TrackPublic() {
           </span>
         </div>
 
+        {/* ── Status stepper ── */}
+        {!isDone && <div className="mb-4"><StatusStepper status={data.status} /></div>}
+
         <div
           className={
             isDone
@@ -165,72 +351,125 @@ export default function TrackPublic() {
               : "grid gap-4 lg:grid-cols-[1fr_360px]"
           }
         >
-          {/* left column: live map while active, completion summary once done */}
+          {/* ── Left column ── */}
           <div className="space-y-4">
             {isDone ? (
-              <div className="nvc-card p-6 text-center">
-                <span
-                  className="mx-auto grid h-14 w-14 place-items-center rounded-2xl"
-                  style={{ background: `${meta.color}22`, color: meta.color }}
-                >
-                  <CheckCircle2 className="h-7 w-7" />
-                </span>
-                <h2 className="mt-4 font-display text-lg font-bold text-white">
-                  {data.status === "completed"
-                    ? "This job is complete"
-                    : "This job was cancelled"}
-                </h2>
-                <p className="mt-1 text-sm text-slate-400">
-                  Live tracking has ended.
-                  {data.status === "completed"
-                    ? " Thanks for choosing us — if anything needs attention, reach out below."
-                    : " If you have any questions, reach out to the company below."}
-                </p>
-
-                <div className="mt-5 space-y-3 text-left">
-                  {company?.name && (
-                    <div className="flex items-start gap-3 rounded-xl border border-white/10 bg-ink-3/50 p-3">
-                      <Building2 className="mt-0.5 h-4 w-4 shrink-0 text-cyan-glow" />
-                      <div>
-                        <p className="text-xs text-slate-500">Company</p>
-                        <p className="text-sm font-semibold text-white">
-                          {company.name}
-                        </p>
+              /* Completion summary + review */
+              <div className="space-y-4">
+                <div className="nvc-card p-6 text-center">
+                  <span
+                    className="mx-auto grid h-14 w-14 place-items-center rounded-2xl"
+                    style={{ background: `${meta.color}22`, color: meta.color }}
+                  >
+                    <CheckCircle2 className="h-7 w-7" />
+                  </span>
+                  <h2 className="mt-4 font-display text-lg font-bold text-white">
+                    {data.status === "completed"
+                      ? "Job complete — thanks for choosing us!"
+                      : "This job was cancelled"}
+                  </h2>
+                  <p className="mt-1 text-sm text-slate-400">
+                    {data.status === "completed"
+                      ? "We hope everything went smoothly. If anything needs attention, reach out below."
+                      : "If you have any questions, reach out to the company below."}
+                  </p>
+                  <div className="mt-5 space-y-3 text-left">
+                    {company?.name && (
+                      <div className="flex items-start gap-3 rounded-xl border border-white/10 bg-ink-3/50 p-3">
+                        <Building2 className="mt-0.5 h-4 w-4 shrink-0 text-cyan-glow" />
+                        <div>
+                          <p className="text-xs text-slate-500">Company</p>
+                          <p className="text-sm font-semibold text-white">{company.name}</p>
+                        </div>
                       </div>
-                    </div>
-                  )}
-                  {data.tech?.name && (
-                    <div className="flex items-start gap-3 rounded-xl border border-white/10 bg-ink-3/50 p-3">
-                      <TechAvatar
-                        name={data.tech.name}
-                        photoUrl={data.tech.photoUrl}
-                        color={data.tech.color}
-                        className="h-9 w-9"
-                        textClassName="text-sm"
-                      />
-                      <div>
-                        <p className="text-xs text-slate-500">{workerNoun}</p>
-                        <p className="text-sm font-semibold text-white">
-                          {data.tech.name}
-                        </p>
+                    )}
+                    {data.tech?.name && (
+                      <div className="flex items-start gap-3 rounded-xl border border-white/10 bg-ink-3/50 p-3">
+                        <TechAvatar
+                          name={data.tech.name}
+                          photoUrl={data.tech.photoUrl}
+                          color={data.tech.color}
+                          className="h-9 w-9"
+                          textClassName="text-sm"
+                        />
+                        <div>
+                          <p className="text-xs text-slate-500">{workerNoun}</p>
+                          <p className="text-sm font-semibold text-white">{data.tech.name}</p>
+                        </div>
                       </div>
-                    </div>
+                    )}
+                  </div>
+                  {company?.email && (
+                    <a
+                      href={`mailto:${company.email}?subject=${encodeURIComponent(`Re: ${data.title}`)}`}
+                      className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-brand py-2.5 text-sm font-semibold text-white hover:bg-brand-deep"
+                    >
+                      <Mail className="h-4 w-4" /> Email {company.name || "the company"}
+                    </a>
                   )}
                 </div>
 
-                {company?.email && (
-                  <a
-                    href={`mailto:${company.email}?subject=${encodeURIComponent(
-                      `Re: ${data.title}`,
-                    )}`}
-                    className="mt-5 flex items-center justify-center gap-2 rounded-xl bg-brand py-2.5 text-sm font-semibold text-white hover:bg-brand-deep"
-                  >
-                    <Mail className="h-4 w-4" /> Email {company.name || "the company"}
-                  </a>
+                {/* Star rating — only for completed jobs */}
+                {data.status === "completed" && (
+                  <div className="nvc-card p-5">
+                    {reviewSubmitted ? (
+                      <div className="flex flex-col items-center gap-2 py-3 text-center">
+                        <CheckCircle2 className="h-8 w-8 text-emerald-live" />
+                        <p className="font-bold text-white">Thanks for your feedback!</p>
+                        <p className="text-sm text-slate-400">Your review helps us improve.</p>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="mb-1 text-center text-sm font-bold text-white">How was your experience?</p>
+                        <p className="mb-4 text-center text-xs text-slate-500">
+                          Rate your {workerNoun.toLowerCase()}{data.tech?.name ? `, ${data.tech.name}` : ""}
+                        </p>
+                        <div className="mb-4 flex justify-center gap-2">
+                          {[1, 2, 3, 4, 5].map((n) => (
+                            <button
+                              key={n}
+                              onClick={() => setReviewRating(n)}
+                              onMouseEnter={() => setReviewHover(n)}
+                              onMouseLeave={() => setReviewHover(0)}
+                              className="transition-transform hover:scale-110"
+                            >
+                              <Star
+                                className={`h-9 w-9 ${
+                                  n <= (reviewHover || reviewRating)
+                                    ? "fill-amber-warn text-amber-warn"
+                                    : "text-slate-600"
+                                }`}
+                              />
+                            </button>
+                          ))}
+                        </div>
+                        {reviewRating > 0 && (
+                          <>
+                            <textarea
+                              value={reviewComment}
+                              onChange={(e) => setReviewComment(e.target.value)}
+                              placeholder="Any comments? (optional)"
+                              rows={2}
+                              className="mb-3 w-full resize-none rounded-xl border border-white/10 bg-ink-3/60 px-3 py-2 text-sm text-white placeholder:text-slate-600 focus:border-brand focus:outline-none"
+                            />
+                            <button
+                              onClick={() => submitReview.mutate({ rating: reviewRating, comment: reviewComment })}
+                              disabled={submitReview.isPending}
+                              className="w-full rounded-xl bg-brand py-2.5 text-sm font-semibold text-white hover:bg-brand-deep disabled:opacity-50"
+                            >
+                              {submitReview.isPending ? "Submitting…" : "Submit review"}
+                            </button>
+                          </>
+                        )}
+                      </>
+                    )}
+                  </div>
                 )}
               </div>
             ) : (
+              /* Live tracking view */
               <>
+                {/* Map */}
                 <div className="overflow-hidden rounded-2xl border border-white/10">
                   <LiveMap
                     rider={data.techLocation}
@@ -241,20 +480,59 @@ export default function TrackPublic() {
                   />
                 </div>
 
-                {data.etaMins != null && (
+                {/* ETA card — live countdown while en route, arrived banner once there */}
+                {isArrived ? (
                   <div className="nvc-card flex items-center gap-3 p-4">
                     <span className="grid h-11 w-11 place-items-center rounded-xl bg-emerald-live/15 text-emerald-live">
-                      <Clock className="h-5 w-5" />
+                      <MapPin className="h-5 w-5" />
                     </span>
                     <div>
                       <p className="font-display text-lg font-bold text-white">
-                        ~{data.etaMins} min away
+                        {data.status === "in_progress" ? "Job in progress" : "Your tech has arrived!"}
                       </p>
-                      <p className="text-xs text-slate-400">Estimated arrival</p>
+                      <p className="text-xs text-slate-400">
+                        {data.status === "in_progress"
+                          ? "Work is underway at your location"
+                          : "They are on-site and ready to begin"}
+                      </p>
                     </div>
                   </div>
-                )}
+                ) : liveEta != null ? (
+                  <div className="nvc-card flex items-center gap-3 p-4">
+                    <span className="relative grid h-11 w-11 place-items-center rounded-xl bg-emerald-live/15 text-emerald-live">
+                      <Clock className="h-5 w-5" />
+                      {isEnroute && (
+                        <span className="absolute inset-0 animate-ping rounded-xl bg-emerald-live/20" />
+                      )}
+                    </span>
+                    <div className="flex-1">
+                      <div className="flex items-baseline gap-2">
+                        <p className="font-display text-2xl font-bold tabular-nums text-white">
+                          {liveEta}
+                        </p>
+                        {liveEta !== "Arriving now" && (
+                          <span className="text-xs text-slate-400">estimated arrival</span>
+                        )}
+                      </div>
+                      {data.etaDistanceKm != null && (
+                        <p className="text-xs text-slate-500">
+                          {data.etaDistanceKm < 1
+                            ? `${Math.round(data.etaDistanceKm * 1000)} m away`
+                            : `${data.etaDistanceKm.toFixed(1)} km away`}
+                        </p>
+                      )}
+                    </div>
+                    {/* live pulse dot */}
+                    {sseUp && (
+                      <span className="flex items-center gap-1 text-[10px] text-emerald-live">
+                        <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-live" />
+                        Live
+                      </span>
+                    )}
+                  </div>
+                ) : null}
 
+                {/* Destination */}
                 <div className="nvc-card flex items-start gap-3 p-4">
                   <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-cyan-glow" />
                   <div>
@@ -268,114 +546,119 @@ export default function TrackPublic() {
             )}
           </div>
 
-          {/* tech card + messaging — only while the job is active */}
+          {/* ── Right column: tech card + messaging ── */}
           {!isDone && (
-          <div className="space-y-4">
-            {data.tech && (
-              <div className="nvc-card p-4">
-                <div className="flex items-center gap-3">
-                  <TechAvatar
-                    name={data.tech.name}
-                    photoUrl={data.tech.photoUrl}
-                    color={data.tech.color}
-                    className="h-12 w-12"
-                    textClassName="text-base"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate font-bold text-white">
-                      {data.tech.name}
-                    </p>
-                    <p className="flex items-center gap-1 text-xs text-slate-400">
-                      <Star className="h-3 w-3 fill-amber-warn text-amber-warn" />
-                      {data.tech.rating?.toFixed(1) ?? "—"} · {data.tech.skillClass}
-                    </p>
+            <div className="space-y-4">
+              {data.tech && (
+                <div className="nvc-card p-4">
+                  <div className="flex items-center gap-3">
+                    <TechAvatar
+                      name={data.tech.name}
+                      photoUrl={data.tech.photoUrl}
+                      color={data.tech.color}
+                      className="h-12 w-12"
+                      textClassName="text-base"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate font-bold text-white">
+                        {data.tech.name}
+                      </p>
+                      <p className="flex items-center gap-1 text-xs text-slate-400">
+                        <Star className="h-3 w-3 fill-amber-warn text-amber-warn" />
+                        {data.tech.rating?.toFixed(1) ?? "—"} ·{" "}
+                        {data.tech.skillClass}
+                      </p>
+                    </div>
                   </div>
-                </div>
-                {data.tech.vehicle && (
-                  <p className="mt-3 flex items-center gap-1.5 text-xs text-slate-400">
-                    <Truck className="h-3.5 w-3.5" /> {data.tech.vehicle}
-                  </p>
-                )}
-                {data.tech.phone && (
-                  <div className="mt-3 grid grid-cols-2 gap-2">
-                    <a
-                      href={`tel:${data.tech.phone}`}
-                      className="flex items-center justify-center gap-2 rounded-xl bg-brand py-2.5 text-sm font-semibold text-white hover:bg-brand-deep"
-                    >
-                      <Phone className="h-4 w-4" /> Call
-                    </a>
-                    <a
-                      href={`sms:${data.tech.phone}`}
-                      className="flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-ink-3 py-2.5 text-sm font-semibold text-slate-200 hover:bg-ink-3/80"
-                    >
-                      <MessageCircle className="h-4 w-4" /> Text
-                    </a>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* messaging */}
-            <div className="nvc-card flex h-[360px] flex-col">
-              <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
-                <MessageSquare className="h-4 w-4 text-cyan-glow" />
-                <p className="font-bold text-white">Messages</p>
-              </div>
-              <div ref={scrollRef} className="flex-1 space-y-2 overflow-y-auto p-3">
-                {msgs.length === 0 ? (
-                  <p className="py-10 text-center text-xs text-slate-600">
-                    Send a message to your {workerNoun.toLowerCase()}
-                  </p>
-                ) : (
-                  msgs.map((m: any) => {
-                    const mine = m.senderRole === "client";
-                    return (
-                      <div
-                        key={m.id}
-                        className={`flex ${mine ? "justify-end" : "justify-start"}`}
+                  {data.tech.vehicle && (
+                    <p className="mt-3 flex items-center gap-1.5 text-xs text-slate-400">
+                      <Truck className="h-3.5 w-3.5" /> {data.tech.vehicle}
+                    </p>
+                  )}
+                  {data.tech.phone && (
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      <a
+                        href={`tel:${data.tech.phone}`}
+                        className="flex items-center justify-center gap-2 rounded-xl bg-brand py-2.5 text-sm font-semibold text-white hover:bg-brand-deep"
                       >
-                        <div
-                          className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm ${
-                            mine
-                              ? "bg-brand text-white"
-                              : "bg-ink-3 text-slate-200"
-                          }`}
-                        >
-                          {!mine && (
-                            <p className="mb-0.5 text-[10px] font-semibold text-cyan-glow">
-                              {m.senderName}
-                            </p>
-                          )}
-                          {m.body}
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  if (draft.trim()) send.mutate(draft.trim());
-                }}
-                className="flex gap-2 border-t border-white/5 p-3"
-              >
-                <input aria-label="Type a message…"
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  placeholder="Type a message…"
-                  className="flex-1 rounded-lg border border-white/10 bg-ink-3/60 px-3 py-2 text-sm text-white placeholder:text-slate-600 focus:border-brand focus:outline-none"
-                />
-                <button
-                  type="submit"
-                  disabled={!draft.trim() || send.isPending}
-                  className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand text-white hover:bg-brand-deep disabled:opacity-50"
+                        <Phone className="h-4 w-4" /> Call
+                      </a>
+                      <a
+                        href={`sms:${data.tech.phone}`}
+                        className="flex items-center justify-center gap-2 rounded-xl border border-white/10 bg-ink-3 py-2.5 text-sm font-semibold text-slate-200 hover:bg-ink-3/80"
+                      >
+                        <MessageCircle className="h-4 w-4" /> Text
+                      </a>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Messaging */}
+              <div className="nvc-card flex h-[360px] flex-col">
+                <div className="flex items-center gap-2 border-b border-white/5 px-4 py-3">
+                  <MessageSquare className="h-4 w-4 text-cyan-glow" />
+                  <p className="font-bold text-white">Messages</p>
+                </div>
+                <div
+                  ref={scrollRef}
+                  className="flex-1 space-y-2 overflow-y-auto p-3"
                 >
-                  <Send className="h-4 w-4" />
-                </button>
-              </form>
+                  {msgs.length === 0 ? (
+                    <p className="py-10 text-center text-xs text-slate-600">
+                      Send a message to your {workerNoun.toLowerCase()}
+                    </p>
+                  ) : (
+                    msgs.map((m: any) => {
+                      const mine = m.senderRole === "client";
+                      return (
+                        <div
+                          key={m.id}
+                          className={`flex ${mine ? "justify-end" : "justify-start"}`}
+                        >
+                          <div
+                            className={`max-w-[80%] rounded-2xl px-3 py-2 text-sm ${
+                              mine
+                                ? "bg-brand text-white"
+                                : "bg-ink-3 text-slate-200"
+                            }`}
+                          >
+                            {!mine && (
+                              <p className="mb-0.5 text-[10px] font-semibold text-cyan-glow">
+                                {m.senderName}
+                              </p>
+                            )}
+                            {m.body}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    if (draft.trim()) send.mutate(draft.trim());
+                  }}
+                  className="flex gap-2 border-t border-white/5 p-3"
+                >
+                  <input
+                    aria-label="Type a message…"
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    placeholder="Type a message…"
+                    className="flex-1 rounded-lg border border-white/10 bg-ink-3/60 px-3 py-2 text-sm text-white placeholder:text-slate-600 focus:border-brand focus:outline-none"
+                  />
+                  <button
+                    type="submit"
+                    disabled={!draft.trim() || send.isPending}
+                    className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand text-white hover:bg-brand-deep disabled:opacity-50"
+                  >
+                    <Send className="h-4 w-4" />
+                  </button>
+                </form>
+              </div>
             </div>
-          </div>
           )}
         </div>
       </div>

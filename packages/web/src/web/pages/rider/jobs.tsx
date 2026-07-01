@@ -1,13 +1,16 @@
+import { useState } from "react";
 import { Link } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../lib/api";
 import { StatusBadge } from "../../components/brand";
-import { FullLoader } from "../../components/loader";
+import { FullLoader, Loader } from "../../components/loader";
 import { fmtDate, money } from "../../lib/utils";
-import { MapPin, Calendar, ArrowRight, Power } from "lucide-react";
+import { MapPin, Calendar, ArrowRight, Power, AlertCircle } from "lucide-react";
 
 export default function RiderJobs() {
   const qc = useQueryClient();
+  const [toggleErr, setToggleErr] = useState<string | null>(null);
+
   const me = useQuery({
     queryKey: ["rider-me"],
     queryFn: async () => (await api.riders.me.$get()).json(),
@@ -19,9 +22,16 @@ export default function RiderJobs() {
 
   const toggle = useMutation({
     mutationFn: async (status: string) => {
-      await api.riders.me.$patch({ json: { status } });
+      const res = await api.riders.me.$patch({ json: { status } });
+      if (!res.ok) throw new Error(`Status ${res.status}`);
     },
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["rider-me"] }),
+    onSuccess: () => {
+      setToggleErr(null);
+      qc.invalidateQueries({ queryKey: ["rider-me"] });
+    },
+    onError: (e: Error) => {
+      setToggleErr(e.message.includes("403") ? "Permission denied — contact your dispatcher." : "Failed to update status. Try again.");
+    },
   });
 
   if (bookings.isLoading || me.isLoading) return <FullLoader label="Loading jobs…" />;
@@ -42,12 +52,25 @@ export default function RiderJobs() {
           <p className="text-sm text-white/80">{online ? "You're online & accepting jobs" : "You're offline"}</p>
         </div>
         <button
-          onClick={() => toggle.mutate(online ? "offline" : "available")}
-          className={`flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-semibold transition ${online ? "bg-white text-cyan-glow" : "bg-white/20 text-white"}`}
+          disabled={toggle.isPending}
+          onClick={() => { setToggleErr(null); toggle.mutate(online ? "offline" : "available"); }}
+          className={`flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-semibold transition disabled:opacity-60 ${online ? "bg-white text-cyan-glow" : "bg-white/20 text-white"}`}
         >
-          <Power className="h-4 w-4" /> {online ? "Online" : "Go online"}
+          {toggle.isPending
+            ? <Loader className="h-4 w-4 border-current/30 border-t-current" />
+            : <Power className="h-4 w-4" />}
+          {online ? "Online" : "Go online"}
         </button>
       </div>
+
+      {/* toggle error banner */}
+      {toggleErr && (
+        <div className="flex items-center gap-2 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-400">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          {toggleErr}
+          <button onClick={() => setToggleErr(null)} className="ml-auto text-red-300 hover:text-red-100">✕</button>
+        </div>
+      )}
 
       {offered.length > 0 && (
         <div className="rounded-2xl border border-amber-400/30 bg-amber-400/5 p-3">
@@ -108,7 +131,7 @@ function JobCard({ b, cta }: { b: any; cta: string }) {
           {b.customer && <p className="mt-0.5 text-xs text-slate-500">Customer: {b.customer.name}</p>}
         </div>
         <div className="text-right">
-          <div className="font-extrabold text-green-600">{money(b.price)}</div>
+          <div className="font-extrabold text-green-600">{money(b.techPay ?? b.price)}</div>
           <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-cyan-glow">{cta}<ArrowRight className="h-3 w-3" /></span>
         </div>
       </div>

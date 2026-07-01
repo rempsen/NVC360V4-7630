@@ -1,10 +1,95 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, Component, type ReactNode } from "react";
 import { Route, Switch } from "wouter";
 import Index from "./pages/index";
 import AuthPage from "./pages/auth";
 import { Provider } from "./components/provider";
 import { ProtectedRoute } from "./components/protected-route";
 import { AgentFeedback } from "@runablehq/website-runtime";
+
+// ─── Global error boundary — catches any component crash, shows a recovery
+//     card instead of a blank white screen. ──────────────────────────────────
+class ErrorBoundary extends Component<
+  { children: ReactNode },
+  { error: Error | null }
+> {
+  state = { error: null };
+  static getDerivedStateFromError(e: Error) {
+    return { error: e };
+  }
+  componentDidCatch(e: Error, info: { componentStack: string }) {
+    // Log to console for Runable devtools visibility
+    console.error("[ErrorBoundary]", e, info.componentStack);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div
+          style={{
+            minHeight: "100vh",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "#070b12",
+            padding: "2rem",
+          }}
+        >
+          <div
+            style={{
+              maxWidth: 480,
+              width: "100%",
+              background: "#0f1a2e",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 16,
+              padding: "2rem",
+              textAlign: "center",
+            }}
+          >
+            <div style={{ fontSize: 36, marginBottom: "0.75rem" }}>⚠️</div>
+            <h2
+              style={{
+                color: "#f8fafc",
+                fontWeight: 700,
+                fontSize: "1.125rem",
+                marginBottom: "0.5rem",
+              }}
+            >
+              Something went wrong
+            </h2>
+            <p
+              style={{
+                color: "#64748b",
+                fontSize: "0.875rem",
+                marginBottom: "1.5rem",
+                lineHeight: 1.6,
+              }}
+            >
+              {(this.state.error as Error).message || "An unexpected error occurred."}
+            </p>
+            <button
+              onClick={() => {
+                this.setState({ error: null });
+                window.location.reload();
+              }}
+              style={{
+                background: "#0ea5e9",
+                color: "#fff",
+                border: "none",
+                borderRadius: 8,
+                padding: "0.5rem 1.5rem",
+                fontWeight: 600,
+                fontSize: "0.875rem",
+                cursor: "pointer",
+              }}
+            >
+              Reload page
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 // Route-level code-splitting. The public landing + auth pages stay in the main
 // bundle (needed on first paint), while the heavy authenticated apps
@@ -48,6 +133,7 @@ function RouteFallback() {
 
 function App() {
   return (
+    <ErrorBoundary>
     <Provider>
       <Suspense fallback={<RouteFallback />}>
         <Switch>
@@ -80,6 +166,7 @@ function App() {
       {/* Do not remove — off by default, activated by parent iframe via postMessage */}
       {import.meta.env.DEV && <AgentFeedback />}
     </Provider>
+    </ErrorBoundary>
   );
 }
 

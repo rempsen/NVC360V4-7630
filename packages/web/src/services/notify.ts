@@ -1,7 +1,7 @@
 import * as schema from "../api/database/schema";
 import { eq } from "drizzle-orm";
 import { tdb } from "../api/database/tenant";
-import { sendEmail, emailTemplates, loadEmailBrand } from "./email";
+import { sendEmail, emailTemplates, loadEmailBrand, resolveFromAddress } from "./email";
 import { buildSingleEventIcs } from "./ics";
 import { sendPush } from "./push";
 
@@ -45,7 +45,10 @@ export async function notify(args: NotifyArgs) {
 
   if (args.emailKind && args.email && args.emailData) {
     // Brand every outbound email with this tenant's logo + name.
-    const brand = await loadEmailBrand(args.companyId);
+    const [brand, identity] = await Promise.all([
+      loadEmailBrand(args.companyId),
+      resolveFromAddress(args.companyId),
+    ]);
     const tpl = emailTemplates[args.emailKind](args.emailData, brand);
     // Attach a calendar invite for appointment confirmations & reminders.
     let attachments;
@@ -70,10 +73,15 @@ export async function notify(args: NotifyArgs) {
         console.error("ics build failed", e);
       }
     }
-    // fire and forget
-    sendEmail({ to: args.email, subject: tpl.subject, html: tpl.html, attachments }).catch(
-      (e) => console.error("notify email failed", e),
-    );
+    // fire and forget — pass tenant's from/replyTo if configured
+    sendEmail({
+      to: args.email,
+      subject: tpl.subject,
+      html: tpl.html,
+      attachments,
+      ...(identity.from ? { from: identity.from } : {}),
+      ...(identity.replyTo ? { replyTo: identity.replyTo } : {}),
+    }).catch((e) => console.error("notify email failed", e));
   }
 }
 

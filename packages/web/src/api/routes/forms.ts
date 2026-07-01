@@ -42,6 +42,14 @@ const slugify = (s: string) =>
  * Normalize stored fields to the rich shape. Backward-compatible with the old
  * [{key,label,enabled,required}] format — fills in id/type/width.
  */
+// Canonical type lookup for core keys — used as fallback for legacy rows that
+// were saved without a type field (migration also backfills these, but this
+// layer means a stale read can never break the rendered form).
+const CORE_KEY_TYPES: Record<string, IntakeFieldType> = {
+  name: "text", email: "email", phone: "phone", address: "address",
+  serviceType: "select", preferredAt: "date", notes: "textarea", photo: "file",
+};
+
 function normalizeFields(raw: any): any[] {
   const arr = Array.isArray(raw) ? raw : [];
   return arr.map((f: any, i: number) => {
@@ -49,7 +57,7 @@ function normalizeFields(raw: any): any[] {
     return {
       id: f.id || (f.key ? `f_${f.key}` : `f_${i}_${Math.random().toString(36).slice(2, 7)}`),
       key: f.key || `custom_${i}`,
-      type: (f.type || fixedDef?.type || "text") as IntakeFieldType,
+      type: (f.type || CORE_KEY_TYPES[f.key] || fixedDef?.type || "text") as IntakeFieldType,
       label: f.label ?? fixedDef?.label ?? "Field",
       placeholder: f.placeholder ?? "",
       options: Array.isArray(f.options) ? f.options : [],

@@ -347,7 +347,7 @@ export async function fireEvent(event: NvcEvent, bookingId: string) {
       headerStyle: (chanCfg?.emailHeaderStyle as any) || "gradient",
       bgColor: chanCfg?.emailBgColor || "#f1f5f9",
       footer: emailFooter,
-      origin: process.env.WEBSITE_URL || process.env.PUBLIC_URL || "",
+      origin: process.env.WEBSITE_URL || process.env.APP_URL || process.env.PUBLIC_URL || "",
     };
     const interp = (s: string) => interpolate(s, vars);
 

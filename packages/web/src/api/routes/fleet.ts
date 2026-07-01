@@ -14,12 +14,13 @@ export const fleetRoutes = new Hono()
   .get("/", requireAuth, async (c) => {
     const t = tx(c);
     const techs = await t.select(schema.riders);
-    const result = await Promise.all(
+    const result = (await Promise.allSettled(
       techs.map(async (r) => {
         const [ru] = await db
           .select()
           .from(schema.user)
-          .where(eq(schema.user.id, r.userId));
+          .where(eq(schema.user.id, r.userId))
+          .catch(() => [undefined]);
         // current active work order for this tech
         const activeAll = await t.select(
           schema.bookings,
@@ -27,19 +28,22 @@ export const fleetRoutes = new Hono()
             eq(schema.bookings.riderId, r.id),
             inArray(schema.bookings.status, ACTIVE_STATUSES),
           ),
-        );
+        ).catch(() => []);
         activeAll.sort((a, b) => Number(b.createdAt) - Number(a.createdAt));
         const active = activeAll.slice(0, 1);
         let task: any = null;
         if (active[0]) {
-          const svc = await t.selectOne(schema.services, eq(schema.services.id, active[0].serviceId));
+          // guard: serviceId may be null if service was deleted
+          const svc = active[0].serviceId
+            ? await t.selectOne(schema.services, eq(schema.services.id, active[0].serviceId)).catch(() => null)
+            : null;
           task = {
             id: active[0].id,
-            title: active[0].title || svc?.name,
+            title: active[0].title || svc?.name || "Job",
             status: active[0].status,
             address: active[0].address,
             priority: active[0].priority,
-            etaMins: active[0].etaMins,
+            etaMins: (active[0] as any).etaMins ?? null,
             destLat: active[0].lat,
             destLng: active[0].lng,
           };
@@ -62,7 +66,7 @@ export const fleetRoutes = new Hono()
           task,
         };
       }),
-    );
+    )).filter((s) => s.status === "fulfilled").map((s) => (s as PromiseFulfilledResult<any>).value);
     return c.json({ fleet: result }, 200);
   })
   // unassigned / pending work orders (for dispatch + auto-assign)

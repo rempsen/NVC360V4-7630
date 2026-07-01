@@ -7,7 +7,7 @@ import { StatusBadge } from "../../components/brand";
 import { FullLoader, Loader } from "../../components/loader";
 import { fmtDate } from "../../lib/utils";
 import {
-  ArrowLeft, MapPin, Phone, Navigation, CheckCircle2, Play, Flag, Radio, Check, X,
+  ArrowLeft, MapPin, Phone, Navigation, CheckCircle2, Play, Flag, Radio, Check, X, AlertTriangle,
 } from "lucide-react";
 
 // status flow buttons for the rider
@@ -24,6 +24,8 @@ export default function RiderActive() {
   const qc = useQueryClient();
   const [sharing, setSharing] = useState(false);
   const [pos, setPos] = useState<{ lat: number; lng: number } | null>(null);
+  const [declineOpen, setDeclineOpen] = useState(false);
+  const [declineReason, setDeclineReason] = useState("");
   const watchRef = useRef<number | null>(null);
   const simRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -55,7 +57,7 @@ export default function RiderActive() {
   });
   const decline = useMutation({
     mutationFn: async (reason: string) => { await api.bookings[":id"].decline.$post({ param: { id }, json: { reason } }); },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ["bookings"] }); navigate("/rider"); },
+    onSuccess: () => { setDeclineOpen(false); qc.invalidateQueries({ queryKey: ["bookings"] }); navigate("/rider"); },
   });
 
   const b = (booking.data as any)?.booking;
@@ -119,6 +121,7 @@ export default function RiderActive() {
   
 
   return (
+    <>
     <div className="mx-auto max-w-4xl">
       <Link to="/rider" className="mb-4 inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-cyan-glow">
         <ArrowLeft className="h-4 w-4" /> All jobs
@@ -152,7 +155,7 @@ export default function RiderActive() {
               </div>
               <button
                 onClick={sharing ? stopSharing : startSharing}
-                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${sharing ? "bg-red-500/100/10 text-red-400 hover:bg-red-500/100/20" : "bg-brand text-white shadow-lg shadow-brand/30 hover:bg-brand-deep"}`}
+                className={`rounded-full px-4 py-2 text-sm font-semibold transition ${sharing ? "bg-red-500/10 text-red-400 hover:bg-red-500/20" : "bg-brand text-white shadow-lg shadow-brand/30 hover:bg-brand-deep"}`}
               >
                 {sharing ? "Stop" : "Share"}
               </button>
@@ -197,7 +200,7 @@ export default function RiderActive() {
               </button>
               <button
                 disabled={decline.isPending}
-                onClick={() => { const r = window.prompt("Reason for declining (optional):") ?? ""; decline.mutate(r); }}
+                onClick={() => setDeclineOpen(true)}
                 className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-ink py-3 text-sm font-bold text-slate-300 transition hover:border-red-500/40 hover:text-red-400 disabled:opacity-60"
               >
                 <X className="h-4 w-4" /> Decline
@@ -222,5 +225,45 @@ export default function RiderActive() {
         </div>
       </div>
     </div>
+
+    {/* Decline confirmation modal — replaces window.prompt for mobile compat */}
+    {declineOpen && (
+      <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 sm:items-center">
+        <div className="w-full max-w-sm rounded-t-3xl bg-ink-2 p-6 shadow-2xl sm:rounded-2xl">
+          <div className="mb-4 flex items-center gap-3">
+            <div className="grid h-10 w-10 place-items-center rounded-xl bg-red-500/10 text-red-400">
+              <AlertTriangle className="h-5 w-5" />
+            </div>
+            <div>
+              <h3 className="font-bold text-white">Decline this job?</h3>
+              <p className="text-xs text-slate-500">This cannot be undone.</p>
+            </div>
+          </div>
+          <textarea
+            value={declineReason}
+            onChange={(e) => setDeclineReason(e.target.value)}
+            placeholder="Reason (optional)"
+            rows={3}
+            className="w-full rounded-xl border border-white/10 bg-ink px-4 py-3 text-sm text-white placeholder-slate-600 focus:border-brand focus:outline-none"
+          />
+          <div className="mt-4 flex gap-3">
+            <button
+              onClick={() => { setDeclineOpen(false); setDeclineReason(""); }}
+              className="flex-1 rounded-xl border border-white/10 py-3 text-sm font-semibold text-slate-300 hover:border-white/20"
+            >
+              Cancel
+            </button>
+            <button
+              disabled={decline.isPending}
+              onClick={() => decline.mutate(declineReason)}
+              className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-red-500 py-3 text-sm font-bold text-white hover:bg-red-600 disabled:opacity-60"
+            >
+              {decline.isPending ? <Loader className="h-4 w-4 border-white/30 border-t-white" /> : "Confirm decline"}
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }

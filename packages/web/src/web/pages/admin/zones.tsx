@@ -8,9 +8,11 @@ import { FullLoader } from "../../components/loader";
 import { PageWrap } from "../../components/brand";
 import { PageHead } from "./shell";
 import { Modal, Field, inputCls, BtnPrimary, BtnGhost, ConfirmModal } from "../../components/modal";
-import { MapPin, Plus, Pencil, Trash2, MousePointer2, Check, X } from "lucide-react";
+import { MapPin, Plus, Pencil, Trash2, MousePointer2, Check, X, Pentagon, Square, Circle } from "lucide-react";
+import { circleToPolygon, rectToPolygon } from "../../../shared/zone-utils";
 
 type LatLng = [number, number];
+type DrawMode = "polygon" | "rectangle" | "circle";
 type Zone = {
   id: string;
   name: string;
@@ -20,18 +22,22 @@ type Zone = {
   active: boolean;
 };
 
-const WPG: LatLng = [49.8951, -97.1384];
+const FALLBACK_CENTER: LatLng = [49.8951, -97.1384]; // Winnipeg
 
 export default function AdminZones() {
   const qc = useQueryClient();
   const elRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
-  const layersRef = useRef<Record<string, L.Polygon>>({});
-  const draftLayerRef = useRef<L.Polygon | null>(null);
+  const layersRef = useRef<Record<string, L.Layer>>({});
+  const draftLayerRef = useRef<L.Layer | null>(null);
   const draftMarkersRef = useRef<L.CircleMarker[]>([]);
 
   const [drawing, setDrawing] = useState(false);
-  const [draft, setDraft] = useState<LatLng[]>([]);
+  const [drawMode, setDrawMode] = useState<DrawMode>("polygon");
+  const [draft, setDraft] = useState<LatLng[]>([]); // polygon points
+  const [rectA, setRectA] = useState<LatLng | null>(null); // rectangle first corner
+  const [circleCenter, setCircleCenter] = useState<LatLng | null>(null); // circle center
+  const [circleEdge, setCircleEdge] = useState<LatLng | null>(null); // circle radius point
   const [editor, setEditor] = useState<{ open: boolean; zone: Zone | null; polygon: LatLng[] }>({
     open: false,
     zone: null,
@@ -42,8 +48,25 @@ export default function AdminZones() {
 
   const drawingRef = useRef(drawing);
   drawingRef.current = drawing;
+  const drawModeRef = useRef(drawMode);
+  drawModeRef.current = drawMode;
   const draftRef = useRef(draft);
   draftRef.current = draft;
+  const rectARef = useRef(rectA);
+  rectARef.current = rectA;
+  const circleCenterRef = useRef(circleCenter);
+  circleCenterRef.current = circleCenter;
+
+  // Fetch company settings for map center
+  const settingsQ = useQuery({
+    queryKey: ["settings"],
+    queryFn: async () => (await api.settings.$get()).json(),
+  });
+  const companyCenter: LatLng = useMemo(() => {
+    const s = (settingsQ.data as any)?.settings;
+    if (s?.lat && s?.lng && Math.abs(s.lat) > 0.001) return [s.lat, s.lng];
+    return FALLBACK_CENTER;
+  }, [settingsQ.data]);
 
   const zonesQ = useQuery({
     queryKey: ["zones"],
@@ -79,23 +102,86 @@ export default function AdminZones() {
     [zonesQ.data],
   );
 
-  // init map
+  // init map (runs once after settings resolve so we can use companyCenter)
+  const mapInitRef = useRef(false);
   useEffect(() => {
-    if (!elRef.current || mapRef.current) return;
-    const map = L.map(elRef.current, { zoomControl: true, attributionControl: false }).setView(WPG, 11);
+    if (!elRef.current || mapInitRef.current || settingsQ.isLoading) return;
+    mapInitRef.current = true;
+
+    const el = elRef.current as HTMLDivElement & { _leaflet_id?: number };
+    if (el._leaflet_id != null) {
+      delete el._leaflet_id;
+      while (el.firstChild) el.removeChild(el.firstChild);
+    }
+
+    const center: LatLng = (() => {
+      const s = (settingsQ.data as any)?.settings;
+      if (s?.lat && s?.lng && Math.abs(s.lat) > 0.001) return [s.lat, s.lng] as LatLng;
+      return FALLBACK_CENTER;
+    })();
+
+    const map = L.map(el, { zoomControl: true, attributionControl: false }).setView(center, 11);
     L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", { maxZoom: 19 }).addTo(map);
+
     map.on("click", (e: L.LeafletMouseEvent) => {
       if (!drawingRef.current) return;
       const pt: LatLng = [e.latlng.lat, e.latlng.lng];
-      setDraft((d) => [...d, pt]);
+      const mode = drawModeRef.current;
+
+      if (mode === "polygon") {
+        setDraft((d) => [...d, pt]);
+      } else if (mode === "rectangle") {
+        if (!rectARef.current) {
+          setRectA(pt);
+        } else {
+          // second click — finish rectangle
+          const poly = rectToPolygon(rectARef.current[0], rectARef.current[1], pt[0], pt[1]);
+          setRectA(null);
+          setDrawing(false);
+          setEditor({ open: true, zone: null, polygon: poly });
+        }
+      } else if (mode === "circle") {
+        if (!circleCenterRef.current) {
+          setCircleCenter(pt);
+        } else {
+          // second click — finish circle
+          const cx = circleCenterRef.current[0];
+          const cy = circleCenterRef.current[1];
+          // compute radius in meters
+          const dx = (pt[1] - cy) * 111320 * Math.cos((cx * Math.PI) / 180);
+          const dy = (pt[0] - cx) * 111320;
+          const radiusM = Math.sqrt(dx * dx + dy * dy);
+          const poly = circleToPolygon(cx, cy, radiusM);
+          setCircleCenter(null);
+          setCircleEdge(null);
+          setDrawing(false);
+          setEditor({ open: true, zone: null, polygon: poly });
+        }
+      }
     });
+
+    // mousemove for live preview of rect/circle second point
+    map.on("mousemove", (e: L.LeafletMouseEvent) => {
+      if (!drawingRef.current) return;
+      const mode = drawModeRef.current;
+      if (mode === "rectangle" && rectARef.current) {
+        // preview handled via state update — throttle via animation frame
+        const pt: LatLng = [e.latlng.lat, e.latlng.lng];
+        setDraft([pt]); // abuse draft to carry hover point for rect preview
+      } else if (mode === "circle" && circleCenterRef.current) {
+        const pt: LatLng = [e.latlng.lat, e.latlng.lng];
+        setCircleEdge(pt);
+      }
+    });
+
     mapRef.current = map;
     setTimeout(() => map.invalidateSize(), 150);
     return () => {
       map.remove();
       mapRef.current = null;
+      mapInitRef.current = false;
     };
-  }, []);
+  }, [settingsQ.isLoading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // render saved zones
   useEffect(() => {
@@ -120,7 +206,7 @@ export default function AdminZones() {
     });
   }, [zones, drawing]);
 
-  // render draft polygon + vertices
+  // render draft polygon preview
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -128,45 +214,95 @@ export default function AdminZones() {
     draftLayerRef.current = null;
     draftMarkersRef.current.forEach((m) => m.remove());
     draftMarkersRef.current = [];
-    if (draft.length >= 2) {
-      draftLayerRef.current = L.polygon(draft as L.LatLngExpression[], {
-        color: "#06b6d4",
+
+    if (drawMode === "polygon") {
+      if (draft.length >= 2) {
+        draftLayerRef.current = L.polygon(draft as L.LatLngExpression[], {
+          color: "#06b6d4",
+          weight: 2,
+          dashArray: "5 5",
+          fillOpacity: 0.12,
+        }).addTo(map);
+      }
+      draft.forEach((p) => {
+        const m = L.circleMarker(p, { radius: 5, color: "#06b6d4", fillColor: "#0e7490", fillOpacity: 1, weight: 2 }).addTo(map);
+        draftMarkersRef.current.push(m);
+      });
+    } else if (drawMode === "rectangle" && rectA && draft.length > 0) {
+      const hoverPt = draft[0]; // hover point stored in draft
+      const poly = rectToPolygon(rectA[0], rectA[1], hoverPt[0], hoverPt[1]);
+      draftLayerRef.current = L.polygon(poly as L.LatLngExpression[], {
+        color: "#f59e0b",
         weight: 2,
         dashArray: "5 5",
         fillOpacity: 0.12,
       }).addTo(map);
-    }
-    draft.forEach((p) => {
-      const m = L.circleMarker(p, { radius: 5, color: "#06b6d4", fillColor: "#0e7490", fillOpacity: 1, weight: 2 }).addTo(map);
+      const m = L.circleMarker(rectA, { radius: 6, color: "#f59e0b", fillColor: "#d97706", fillOpacity: 1, weight: 2 }).addTo(map);
       draftMarkersRef.current.push(m);
-    });
-  }, [draft]);
+    } else if (drawMode === "circle" && circleCenter) {
+      const edge = circleEdge;
+      if (edge) {
+        const cx = circleCenter[0], cy = circleCenter[1];
+        const dx = (edge[1] - cy) * 111320 * Math.cos((cx * Math.PI) / 180);
+        const dy = (edge[0] - cx) * 111320;
+        const radiusM = Math.sqrt(dx * dx + dy * dy);
+        const poly = circleToPolygon(cx, cy, radiusM, 64);
+        draftLayerRef.current = L.polygon(poly as L.LatLngExpression[], {
+          color: "#8b5cf6",
+          weight: 2,
+          dashArray: "5 5",
+          fillOpacity: 0.12,
+        }).addTo(map);
+      }
+      const m = L.circleMarker(circleCenter, { radius: 7, color: "#8b5cf6", fillColor: "#6d28d9", fillOpacity: 1, weight: 2 }).addTo(map);
+      draftMarkersRef.current.push(m);
+    }
+  }, [draft, rectA, circleCenter, circleEdge, drawMode]);
 
-  function startDraw() {
+  function startDraw(mode: DrawMode) {
     setSelected(null);
     setDraft([]);
+    setRectA(null);
+    setCircleCenter(null);
+    setCircleEdge(null);
+    setDrawMode(mode);
     setDrawing(true);
   }
   function cancelDraw() {
     setDrawing(false);
     setDraft([]);
+    setRectA(null);
+    setCircleCenter(null);
+    setCircleEdge(null);
   }
-  function finishDraw() {
+  function finishPolygon() {
     if (draft.length < 3) return;
     setDrawing(false);
     setEditor({ open: true, zone: null, polygon: draft });
+    setDraft([]);
   }
   function closeEditor() {
     setEditor({ open: false, zone: null, polygon: [] });
     setDraft([]);
+    setRectA(null);
+    setCircleCenter(null);
+    setCircleEdge(null);
   }
   function editZone(z: Zone) {
     setEditor({ open: true, zone: z, polygon: z.polygon });
   }
 
-  if (zonesQ.isLoading) return <FullLoader label="Loading service zones…" />;
+  const loadingMap = zonesQ.isLoading || settingsQ.isLoading;
+  if (loadingMap && !mapRef.current) return <FullLoader label="Loading service zones…" />;
 
   const sel = zones.find((z) => z.id === selected) || null;
+
+  const drawingHint = () => {
+    if (drawMode === "polygon") return `Click map to add points · ${draft.length} placed`;
+    if (drawMode === "rectangle") return rectA ? "Click second corner to finish" : "Click first corner";
+    if (drawMode === "circle") return circleCenter ? "Click any point to set radius" : "Click to set center";
+    return "";
+  };
 
   return (
     <PageWrap>
@@ -176,11 +312,19 @@ export default function AdminZones() {
         actions={
           drawing ? (
             <div className="flex items-center gap-2">
-              <BtnGhost onClick={cancelDraw}><X className="h-4 w-4" /> Cancel</BtnGhost>
-              <BtnPrimary disabled={draft.length < 3} onClick={finishDraw}><Check className="h-4 w-4" /> Done ({draft.length})</BtnPrimary>
+              <BtnGhost onClick={cancelDraw}><X className="h-4 w-4 mr-1" /> Cancel</BtnGhost>
+              {drawMode === "polygon" && (
+                <BtnPrimary disabled={draft.length < 3} onClick={finishPolygon}>
+                  <Check className="h-4 w-4 mr-1" /> Done ({draft.length} pts)
+                </BtnPrimary>
+              )}
             </div>
           ) : (
-            <BtnPrimary onClick={startDraw}><Plus className="h-4 w-4" /> Draw zone</BtnPrimary>
+            <div className="flex items-center gap-1.5">
+              <DrawBtn icon={<Pentagon className="h-3.5 w-3.5" />} label="Polygon" onClick={() => startDraw("polygon")} />
+              <DrawBtn icon={<Square className="h-3.5 w-3.5" />} label="Rectangle" onClick={() => startDraw("rectangle")} />
+              <DrawBtn icon={<Circle className="h-3.5 w-3.5" />} label="Circle" onClick={() => startDraw("circle")} />
+            </div>
           )
         }
       />
@@ -189,7 +333,8 @@ export default function AdminZones() {
         <div className="nvc-card relative overflow-hidden p-0">
           {drawing && (
             <div className="absolute left-1/2 top-3 z-[500] -translate-x-1/2 rounded-full bg-brand/90 px-4 py-1.5 text-xs font-semibold text-white shadow-lg backdrop-blur flex items-center gap-2">
-              <MousePointer2 className="h-3.5 w-3.5" /> Click the map to add points · {draft.length} placed
+              <MousePointer2 className="h-3.5 w-3.5" />
+              {drawingHint()}
             </div>
           )}
           <div ref={elRef} className="h-[560px] w-full" style={{ zIndex: 0 }} />
@@ -199,13 +344,21 @@ export default function AdminZones() {
           <div className="nvc-card p-4">
             <p className="mb-3 text-xs uppercase tracking-wide text-slate-500">{zones.length} zones</p>
             {zones.length === 0 ? (
-              <p className="py-6 text-center text-sm text-slate-500">No zones yet. Click "Draw zone" and outline an area on the map.</p>
+              <p className="py-6 text-center text-sm text-slate-500">
+                No zones yet. Use <strong className="text-slate-300">Polygon</strong>,{" "}
+                <strong className="text-slate-300">Rectangle</strong>, or{" "}
+                <strong className="text-slate-300">Circle</strong> to draw a coverage area.
+              </p>
             ) : (
               <div className="space-y-2">
                 {zones.map((z) => (
                   <div
                     key={z.id}
-                    {...activate(() => { setSelected(z.id); const l = layersRef.current[z.id]; if (l && mapRef.current) mapRef.current.fitBounds(l.getBounds(), { padding: [40, 40] }); })}
+                    {...activate(() => {
+                      setSelected(z.id);
+                      const l = layersRef.current[z.id] as L.Polygon | undefined;
+                      if (l && mapRef.current) mapRef.current.fitBounds((l as L.Polygon).getBounds(), { padding: [40, 40] });
+                    })}
                     className={`group flex cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 transition ${
                       selected === z.id ? "border-brand/50 bg-brand/10" : "border-white/5 bg-white/[0.02] hover:bg-white/[0.05]"
                     }`}
@@ -239,13 +392,22 @@ export default function AdminZones() {
               <dl className="space-y-1 text-sm">
                 <Row k="Surge multiplier" v={`${sel.surgeMultiplier}×`} />
                 <Row k="Status" v={sel.active ? "Active" : "Inactive"} />
-                <Row k="Vertices" v={String(sel.polygon.length)} />
+                <Row k="Boundary pts" v={String(sel.polygon.length)} />
               </dl>
               <button onClick={() => editZone(sel)} className="mt-3 w-full rounded-xl bg-white/5 py-2 text-sm font-semibold text-white hover:bg-white/10">
                 Edit zone
               </button>
             </div>
           )}
+
+          <div className="nvc-card p-4">
+            <p className="text-xs uppercase tracking-wide text-slate-500 mb-2">Zone enforcement</p>
+            <p className="text-xs text-slate-400 leading-relaxed">
+              {zones.filter((z) => z.active).length === 0
+                ? "No active zones — work orders accepted from any address."
+                : `${zones.filter((z) => z.active).length} active zone${zones.filter((z) => z.active).length !== 1 ? "s" : ""}. Work orders and intake submissions outside these zones will be rejected.`}
+            </p>
+          </div>
         </div>
       </div>
 
@@ -269,6 +431,17 @@ export default function AdminZones() {
         danger
       />
     </PageWrap>
+  );
+}
+
+function DrawBtn({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-white/5 px-3 py-1.5 text-xs font-semibold text-slate-200 hover:bg-white/10 hover:text-white transition"
+    >
+      {icon} {label}
+    </button>
   );
 }
 
@@ -327,7 +500,7 @@ function ZoneEditor({
     >
       <div className="space-y-3">
         <Field label="Zone name">
-          <input aria-label="Downtown Core" className={inputCls} value={form.name} placeholder="Downtown Core" onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          <input aria-label="Zone name" className={inputCls} value={form.name} placeholder="Downtown Core" onChange={(e) => setForm({ ...form, name: e.target.value })} />
         </Field>
         <Field label="Color">
           <div className="flex flex-wrap gap-2">
@@ -344,7 +517,8 @@ function ZoneEditor({
           </div>
         </Field>
         <Field label="Surge multiplier" hint="1 = normal pricing, 1.5 = +50%">
-          <input aria-label="Surge Multiplier"
+          <input
+            aria-label="Surge multiplier"
             type="number"
             step="0.1"
             min="1"

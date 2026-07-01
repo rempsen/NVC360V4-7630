@@ -143,10 +143,10 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
       <>
         {groups.map((g) => (
           <div key={g.heading} className="mb-3">
-            <p className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wider text-slate-600">
+            <p className="px-3 pb-1.5 pt-3 text-[9px] font-bold uppercase tracking-[0.12em] text-slate-600/80">
               {g.heading}
             </p>
-            <div className="space-y-0.5">
+            <div className="space-y-px">
               {g.items.map((n) => {
                 const active =
                   n.to === "/admin" ? loc === "/admin" : loc.startsWith(n.to);
@@ -155,13 +155,16 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
                     key={n.to}
                     to={n.to}
                     className={cn(
-                      "flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition",
+                      "relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-all duration-150",
                       active
-                        ? "bg-brand/15 text-cyan-glow nvc-glow-sm"
-                        : "text-slate-400 hover:bg-white/5 hover:text-slate-200",
+                        ? "bg-brand/12 font-semibold text-white"
+                        : "font-medium text-slate-500 hover:bg-white/[0.04] hover:text-slate-300",
                     )}
                   >
-                    <n.icon className="h-[18px] w-[18px] shrink-0" />{" "}
+                    {active && (
+                      <span className="absolute left-0 top-1/2 h-5 w-0.5 -translate-y-1/2 rounded-r bg-brand" />
+                    )}
+                    <n.icon className={cn("h-[17px] w-[17px] shrink-0 transition-colors", active ? "text-brand" : "text-slate-600 group-hover:text-slate-400")} />{" "}
                     {n.label.replace("__WORKER_PLURAL__", workerPlural)}
                   </Link>
                 );
@@ -175,24 +178,24 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
 
   function UserFooter() {
     return (
-      <div className="border-t border-white/5 p-3">
-        <div className="flex items-center gap-3 rounded-lg px-2 py-1.5">
-          <div className="grid h-9 w-9 place-items-center rounded-full bg-brand/15 text-sm font-bold text-cyan-glow">
+      <div className="border-t border-white/[0.06] p-3">
+        <div className="flex items-center gap-2.5 rounded-xl bg-white/[0.03] px-2.5 py-2 ring-1 ring-white/[0.05]">
+          <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-brand/20 text-xs font-bold text-brand">
             {user?.name?.[0]?.toUpperCase() ?? "D"}
           </div>
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-semibold text-slate-100">
+            <p className="truncate text-sm font-semibold text-slate-100 leading-tight">
               {user?.name}
             </p>
-            <p className="truncate text-xs text-slate-500">{roleLabel(role)}</p>
+            <p className="truncate text-[11px] text-slate-500 leading-tight mt-0.5">{roleLabel(role)}</p>
           </div>
           <button
             onClick={logout}
             title="Sign out"
             aria-label="Sign out"
-            className="grid h-8 w-8 place-items-center rounded-lg text-slate-500 hover:bg-red-500/10 hover:text-red-400"
+            className="grid h-7 w-7 place-items-center rounded-md text-slate-600 transition-colors hover:bg-red-500/10 hover:text-red-400"
           >
-            <LogOut className="h-4 w-4" />
+            <LogOut className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
@@ -202,7 +205,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen overflow-x-hidden bg-ink text-slate-200">
       {/* desktop sidebar */}
-      <aside className="fixed inset-y-0 left-0 z-30 hidden w-60 flex-col border-r border-white/5 bg-ink-2 md:flex">
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[228px] flex-col border-r border-white/[0.06] bg-ink-2 md:flex">
         <div className="flex h-16 items-center border-b border-white/5 px-5">
           <Logo to="/admin" />
         </div>
@@ -255,7 +258,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
         </div>
       )}
 
-      <main className="md:pl-60">{children}</main>
+      <main className="md:pl-[228px]">{children}</main>
 
       {/* persistent dispatch messaging — available on every admin screen */}
       <DispatchMessenger />

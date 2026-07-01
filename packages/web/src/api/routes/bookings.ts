@@ -13,6 +13,8 @@ import { applyBookingStatus } from "../../services/booking-status";
 import { putObject } from "../lib/storage";
 import { capture } from "../lib/analytics";
 import { incr } from "../lib/metrics";
+import { publishTrack } from "../../services/realtime";
+import { isInAnyZone } from "../../shared/zone-utils";
 
 type SessionUser = { id: string; role?: string; email: string; name: string };
 
@@ -20,34 +22,50 @@ type SessionUser = { id: string; role?: string; email: string; name: string };
 
 
 async function enrich(b: typeof schema.bookings.$inferSelect) {
-  const t = tdb(b.companyId);
-  const svc = await t.selectOne(schema.services, eq(schema.services.id, b.serviceId));
-  let rider: any = null;
-  if (b.riderId) {
-    const r = await t.selectOne(schema.riders, eq(schema.riders.id, b.riderId));
-    if (r) {
-      const [ru] = await db
+  try {
+    const t = tdb(b.companyId);
+    // guard: serviceId may be null if service was deleted
+    let svc: any = null;
+    if (b.serviceId) {
+      svc = await t.selectOne(schema.services, eq(schema.services.id, b.serviceId)).catch(() => null);
+    }
+    let rider: any = null;
+    if (b.riderId) {
+      const r = await t.selectOne(schema.riders, eq(schema.riders.id, b.riderId)).catch(() => null);
+      if (r) {
+        const [ru] = await db
+          .select()
+          .from(schema.user)
+          .where(eq(schema.user.id, r.userId))
+          .catch(() => [undefined]);
+        rider = { ...r, name: ru?.name, phone: ru?.phone };
+      }
+    }
+    let cust: any = undefined;
+    if (b.customerId) {
+      [cust] = await db
         .select()
         .from(schema.user)
-        .where(eq(schema.user.id, r.userId));
-      rider = { ...r, name: ru?.name, phone: ru?.phone };
+        .where(eq(schema.user.id, b.customerId))
+        .catch(() => [undefined]);
     }
+    return {
+      ...b,
+      service: svc ?? null,
+      rider,
+      customer: cust ? { id: cust.id, name: cust.name, phone: cust.phone, email: cust.email } : null,
+    };
+  } catch (err) {
+    // never let one bad booking crash the whole list
+    console.error("[enrich] failed for booking", b.id, err);
+    return { ...b, service: null, rider: null, customer: null };
   }
-  const [cust] = await db
-    .select()
-    .from(schema.user)
-    .where(eq(schema.user.id, b.customerId));
-  return {
-    ...b,
-    service: svc ?? null,
-    rider,
-    customer: cust ? { id: cust.id, name: cust.name, phone: cust.phone, email: cust.email } : null,
-  };
 }
 
 async function enrichById(companyId: string, id: string) {
   const fresh = await tdb(companyId).selectOne(schema.bookings, eq(schema.bookings.id, id));
-  return enrich(fresh!);
+  if (!fresh) throw new Error(`Booking ${id} not found`);
+  return enrich(fresh);
 }
 
 export const bookingsRoutes = new Hono()
@@ -98,11 +116,14 @@ export const bookingsRoutes = new Hono()
       lat: body.lat ?? 43.6532,
       lng: body.lng ?? -79.3832,
       notes: body.notes ?? "",
+      staffNotes: (body as any).staffNotes ?? "",
       fieldData: body.fieldData ? JSON.stringify(body.fieldData) : "{}",
       customerPhone: body.phone ?? cu?.phone ?? "",
       region: body.region ?? "",
       rateModel: body.rateModel ? JSON.stringify(body.rateModel) : "",
       lineItems: Array.isArray(body.lineItems) ? JSON.stringify(body.lineItems) : "",
+      requiredSkillClass: (body as any).requiredSkillClass ?? "",
+      requiredSkills: (body as any).requiredSkills ?? "",
       price: svc.basePrice,
     });
 
@@ -149,6 +170,16 @@ export const bookingsRoutes = new Hono()
       .where(eq(schema.user.id, body.customerId));
     if (!cu) return c.json({ message: "Client not found" }, 404);
 
+    // Zone enforcement — only if the booking has a real geocoded lat/lng
+    if (body.lat && body.lng) {
+      const allZones = await t.select(schema.serviceZones);
+      const parsedZones = allZones.map((z) => ({ polygon: JSON.parse(z.polygon || "[]") as [number, number][], active: z.active }));
+      const activeZones = parsedZones.filter((z) => z.active && z.polygon.length >= 3);
+      if (activeZones.length > 0 && !isInAnyZone(body.lat, body.lng, parsedZones)) {
+        return c.json({ message: "Address is outside all active service zones. Please update the client address or adjust your service zones." }, 422);
+      }
+    }
+
     const assignedRider = body.riderId || null;
     const [b] = await t.insert(schema.bookings, {
       customerId: body.customerId,
@@ -163,10 +194,13 @@ export const bookingsRoutes = new Hono()
       lat: body.lat ?? 43.6532,
       lng: body.lng ?? -79.3832,
       notes: body.notes ?? "",
+      staffNotes: (body as any).staffNotes ?? "",
       customerPhone: body.phone ?? cu.phone ?? "",
       region: body.region ?? "",
       rateModel: body.rateModel ? JSON.stringify(body.rateModel) : "",
       lineItems: Array.isArray(body.lineItems) ? JSON.stringify(body.lineItems) : "",
+      requiredSkillClass: (body as any).requiredSkillClass ?? "",
+      requiredSkills: (body as any).requiredSkills ?? "",
       price: svc.basePrice,
     });
 
@@ -234,6 +268,7 @@ export const bookingsRoutes = new Hono()
     if (body.priority !== undefined) set.priority = body.priority;
     if (body.address !== undefined) set.address = body.address;
     if (body.notes !== undefined) set.notes = body.notes;
+    if ((body as any).staffNotes !== undefined) set.staffNotes = (body as any).staffNotes;
     if (body.customerId !== undefined) set.customerId = body.customerId;
     if (body.serviceId !== undefined) set.serviceId = body.serviceId;
     if (body.templateId !== undefined) set.templateId = body.templateId || null;
@@ -247,6 +282,10 @@ export const bookingsRoutes = new Hono()
       set.rateModel = body.rateModel ? JSON.stringify(body.rateModel) : "";
     if (body.lineItems !== undefined)
       set.lineItems = Array.isArray(body.lineItems) ? JSON.stringify(body.lineItems) : "";
+    if ((body as any).requiredSkillClass !== undefined)
+      set.requiredSkillClass = (body as any).requiredSkillClass ?? "";
+    if ((body as any).requiredSkills !== undefined)
+      set.requiredSkills = (body as any).requiredSkills ?? "";
 
     // handle (re)assignment if the rider changed
     const newRider = body.riderId;
@@ -421,5 +460,63 @@ export const bookingsRoutes = new Hono()
       caption,
       source: "upload",
     });
+    // Notify dispatch in real-time so the office sees the new photo immediately
+    if (b.publicToken) {
+      void publishTrack({
+        type: "status",
+        token: b.publicToken,
+        data: { event: "photo_added", photoId: p.id, bookingId: id },
+      });
+    }
     return c.json({ photo: p }, 201);
+  })
+  // ── Checklist toggle (tech) ──────────────────────────────────────────────
+  // PATCH /api/bookings/:id/checklist { index: number, done: boolean }
+  // Tech can check/uncheck individual items. Stored in bookings.checklistState JSON.
+  .patch("/:id/checklist", requireAuth, async (c) => {
+    const id = c.req.param("id");
+    const { index, done } = await c.req.json();
+    const t = tx(c);
+    const b = await t.selectOne(schema.bookings, eq(schema.bookings.id, id));
+    if (!b) return c.json({ message: "Not found" }, 404);
+    let checklist: any[] = [];
+    try { checklist = JSON.parse(b.checklistState || "[]"); } catch {}
+    if (index < 0 || index >= checklist.length) return c.json({ message: "Invalid index" }, 400);
+    const item = checklist[index];
+    checklist[index] = typeof item === "object" ? { ...item, done } : { label: String(item), done };
+    await t.update(schema.bookings, { checklistState: JSON.stringify(checklist) }, eq(schema.bookings.id, id));
+    return c.json({ checklist }, 200);
+  })
+  // Tech saves a field note to the booking record (visible to office/dispatch)
+  .patch("/:id/driver-notes", requireAuth, async (c) => {
+    const id = c.req.param("id");
+    const t = tx(c);
+    const b = await t.selectOne(schema.bookings, eq(schema.bookings.id, id));
+    if (!b) return c.json({ message: "Not found" }, 404);
+    const { notes } = await c.req.json() as { notes: string };
+    await t.update(schema.bookings, { driverNotes: notes ?? "" }, eq(schema.bookings.id, id));
+    return c.json({ ok: true }, 200);
+  })
+  // ── Today's stats for the logged-in tech ────────────────────────────────
+  // GET /api/bookings/today-stats
+  // Returns { jobsDone, earnings, activeJobs } for today's date (tenant-aware)
+  .get("/today-stats", requireAuth, async (c) => {
+    const u = c.get("user") as SessionUser;
+    const t = tx(c);
+    // find rider record for this user
+    const rider = await t.selectOne(schema.riders, eq(schema.riders.userId, u.id));
+    if (!rider) return c.json({ jobsDone: 0, earnings: 0, activeJobs: 0 }, 200);
+    const all = await t.select(schema.bookings, eq(schema.bookings.riderId, rider.id));
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999);
+    const todayJobs = all.filter(b => {
+      const d = b.scheduledAt ? new Date(b.scheduledAt) : null;
+      return d && d >= todayStart && d <= todayEnd;
+    });
+    const jobsDone = todayJobs.filter(b => b.status === "completed").length;
+    const earnings = todayJobs
+      .filter(b => b.status === "completed")
+      .reduce((sum, b) => sum + (Number(b.price) || 0), 0);
+    const activeJobs = todayJobs.filter(b => ["assigned","enroute","arrived","in_progress"].includes(b.status)).length;
+    return c.json({ jobsDone, earnings, activeJobs, totalToday: todayJobs.length }, 200);
   });

@@ -10,6 +10,90 @@ import { putObject, deleteObject } from "../lib/storage";
 type SessionUser = { id: string; role?: string };
 
 export const ridersRoutes = new Hono()
+  // ── Self-service routes (rider acting on own profile) ────────────────────
+  // IMPORTANT: these MUST be registered BEFORE /:id routes so Hono matches
+  // /me literally and doesn't capture it as /:id → requireAdmin → 403.
+
+  // current rider's own profile (creates one if missing)
+  .get("/me", requireAuth, async (c) => {
+    const u = c.get("user") as SessionUser;
+    const t = tx(c);
+    let r = await t.selectOne(schema.riders, eq(schema.riders.userId, u.id));
+    if (!r) {
+      [r] = await t.insert(schema.riders, { userId: u.id, status: "available" });
+    }
+    // Self-heal: derive the true status from active jobs so a stale "busy"
+    // (left behind by a cancel/reassign) clears itself when the app loads.
+    await reconcileRiderStatus(tenantId(c), r.id);
+    r = await t.selectOne(schema.riders, eq(schema.riders.id, r.id));
+    return c.json({ rider: r }, 200);
+  })
+  // update rider status / location
+  .patch("/me", requireAuth, async (c) => {
+    const u = c.get("user") as SessionUser;
+    const body = await c.req.json();
+    const t = tx(c);
+    let r = await t.selectOne(schema.riders, eq(schema.riders.userId, u.id));
+    if (!r) return c.json({ message: "Not found" }, 404);
+
+    const set: Record<string, unknown> = {};
+    if (body.vehicle) set.vehicle = body.vehicle;
+    if (body.lat != null) { set.lat = body.lat; set.lng = body.lng; set.locationUpdatedAt = new Date(); }
+
+    let toggled = false;
+    if (body.status === "offline") {
+      set.manualOffline = true;
+      set.status = "offline";
+      toggled = true;
+    } else if (body.status === "available") {
+      set.manualOffline = false;
+      set.status = "available";
+      set.locationUpdatedAt = new Date();
+      toggled = true;
+    } else if (body.status) {
+      set.status = body.status;
+    }
+
+    const riderId = r.id;
+    if (Object.keys(set).length) {
+      [r] = await t.update(schema.riders, set, eq(schema.riders.id, riderId));
+    }
+    if (toggled) {
+      await reconcileRiderStatus(tenantId(c), riderId);
+      r = await t.selectOne(schema.riders, eq(schema.riders.id, riderId));
+    }
+    return c.json({ rider: r ?? null }, 200);
+  })
+  // tech uploads their own headshot (self-serve, mobile). multipart field: file
+  .post("/me/photo", requireAuth, async (c) => {
+    const u = c.get("user") as SessionUser;
+    const t = tx(c);
+    let existing = await t.selectOne(schema.riders, eq(schema.riders.userId, u.id));
+    if (!existing) {
+      [existing] = await t.insert(schema.riders, { userId: u.id, status: "available" });
+    }
+    const form = await c.req.formData();
+    const file = form.get("file");
+    if (!(file instanceof File)) return c.json({ message: "No file" }, 400);
+    if (file.size > 8 * 1024 * 1024) return c.json({ message: "Image too large (max 8MB)" }, 400);
+    const ALLOWED = ["image/jpeg", "image/png", "image/webp"];
+    if (file.type && !ALLOWED.includes(file.type))
+      return c.json({ message: `Unsupported type ${file.type}` }, 400);
+
+    const ext = (file.name.split(".").pop() || "jpg").toLowerCase().slice(0, 8);
+    const key = `riders/${existing.id}/${Date.now()}.${ext}`;
+    const buf = Buffer.from(await file.arrayBuffer());
+    const stored = await putObject(key, buf, file.type || "image/jpeg");
+    if (existing.photoKey) await deleteObject(existing.photoKey).catch(() => {});
+    const [r] = await t.update(
+      schema.riders,
+      { photoUrl: stored.url, photoKey: stored.key },
+      eq(schema.riders.id, existing.id),
+    );
+    return c.json({ rider: r, photoUrl: stored.url }, 201);
+  })
+
+  // ── Admin / list routes ──────────────────────────────────────────────────
   // list all riders (admin assign UI)
   .get("/", requireAuth, async (c) => {
     const rows = await tx(c).select(schema.riders);
@@ -169,77 +253,4 @@ export const ridersRoutes = new Hono()
     await db.delete(schema.user).where(eq(schema.user.id, r.userId));
     return c.json({ ok: true }, 200);
   })
-  // current rider's own profile (creates one if missing)
-  .get("/me", requireAuth, async (c) => {
-    const u = c.get("user") as SessionUser;
-    const t = tx(c);
-    let r = await t.selectOne(schema.riders, eq(schema.riders.userId, u.id));
-    if (!r) {
-      [r] = await t.insert(schema.riders, { userId: u.id, status: "available" });
-    }
-    // Self-heal: derive the true status from active jobs so a stale "busy"
-    // (left behind by a cancel/reassign) clears itself when the app loads.
-    await reconcileRiderStatus(tenantId(c), r.id);
-    r = await t.selectOne(schema.riders, eq(schema.riders.id, r.id));
-    return c.json({ rider: r }, 200);
-  })
-  // update rider status / location
-  .patch("/me", requireAuth, async (c) => {
-    const u = c.get("user") as SessionUser;
-    const body = await c.req.json();
-    const t = tx(c);
-    let r = await t.selectOne(schema.riders, eq(schema.riders.userId, u.id));
-    if (!r) return c.json({ message: "Not found" }, 404);
-
-    const set: Record<string, unknown> = {};
-    if (body.vehicle) set.vehicle = body.vehicle;
-    if (body.lat != null) { set.lat = body.lat; set.lng = body.lng; set.locationUpdatedAt = new Date(); }
-
-    let toggled = false;
-    if (body.status === "offline") { set.manualOffline = true; set.status = "offline"; toggled = true; }
-    else if (body.status === "available") {
-      set.manualOffline = false;
-      // Going on-duty from the app IS a liveness signal — stamp the heartbeat so
-      // reconcile counts them online immediately, before the first GPS ping lands.
-      set.locationUpdatedAt = new Date();
-      toggled = true;
-    }
-    else if (body.status) { set.status = body.status; }
-
-    if (Object.keys(set).length) {
-      [r] = await t.update(schema.riders, set, eq(schema.riders.id, r.id));
-    }
-    if (toggled) {
-      await reconcileRiderStatus(tenantId(c), r.id);
-      r = await t.selectOne(schema.riders, eq(schema.riders.id, r.id));
-    }
-    return c.json({ rider: r }, 200);
-  })
-  // tech uploads their own headshot (self-serve, mobile). multipart field: file
-  .post("/me/photo", requireAuth, async (c) => {
-    const u = c.get("user") as SessionUser;
-    const t = tx(c);
-    let existing = await t.selectOne(schema.riders, eq(schema.riders.userId, u.id));
-    if (!existing) {
-      [existing] = await t.insert(schema.riders, { userId: u.id, status: "available" });
-    }
-    const form = await c.req.formData();
-    const file = form.get("file");
-    if (!(file instanceof File)) return c.json({ message: "No file" }, 400);
-    if (file.size > 8 * 1024 * 1024) return c.json({ message: "Image too large (max 8MB)" }, 400);
-    const ALLOWED = ["image/jpeg", "image/png", "image/webp"];
-    if (file.type && !ALLOWED.includes(file.type))
-      return c.json({ message: `Unsupported type ${file.type}` }, 400);
-
-    const ext = (file.name.split(".").pop() || "jpg").toLowerCase().slice(0, 8);
-    const key = `riders/${existing.id}/${Date.now()}.${ext}`;
-    const buf = Buffer.from(await file.arrayBuffer());
-    const stored = await putObject(key, buf, file.type || "image/jpeg");
-    if (existing.photoKey) await deleteObject(existing.photoKey).catch(() => {});
-    const [r] = await t.update(
-      schema.riders,
-      { photoUrl: stored.url, photoKey: stored.key },
-      eq(schema.riders.id, existing.id),
-    );
-    return c.json({ rider: r, photoUrl: stored.url }, 201);
-  });
+;

@@ -18,6 +18,19 @@ export default defineConfig(({ mode }) => {
 				"@": path.resolve(__dirname, "./src/web"),
 			},
 		},
+		// Pre-bundle better-auth packages with esbuild rather than letting Rollup
+		// handle them. Rollup's ESM evaluation order for packages that lazily init
+		// their exports (only when the first method is called, not on import) can
+		// produce TDZ errors like "Cannot access 'b' before initialization" in the
+		// minified vendor chunk — even though no circular dep shows in madge.
+		// esbuild converts these ESM packages to CJS-style IIFE internally, which
+		// evaluates top-to-bottom and is immune to TDZ ordering issues.
+		optimizeDeps: {
+			include: [
+				"better-auth/react",
+				"better-auth/client/plugins",
+			],
+		},
 		server: {
 			allowedHosts: true,
 			hmr: { overlay: false, },

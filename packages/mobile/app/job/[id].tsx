@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useLiveActivity } from "../../lib/useLiveActivity";
 import {
   View,
   Text,
@@ -21,6 +22,8 @@ import * as ImagePicker from "expo-image-picker";
 import Constants from "expo-constants";
 import {
   CaretLeft,
+  CaretDown,
+  CaretUp,
   NavigationArrow,
   Phone,
   ChatText,
@@ -33,6 +36,15 @@ import {
   Clock,
   Headset,
   Ruler,
+  Warning,
+  Info,
+  Note,
+  Tag,
+  Timer,
+  Car,
+  CheckCircle,
+  PencilSimple,
+  Buildings,
 } from "phosphor-react-native";
 import { api } from "../../lib/api";
 import { getToken } from "../../lib/auth";
@@ -42,14 +54,16 @@ import { StatusBadge, Button, FullLoader } from "../../components/ui";
 const API = ((Constants.expoConfig?.extra?.apiUrl as string) ?? "").replace(/\/$/, "");
 
 // status -> next manual action.
-// Arrival & job-start are now automatic via geofence, so the only buttons a
-// tech taps are "Start driving" (sends the customer their on-the-way text) and
-// "Job Complete" at the end.
-const FLOW: Record<string, { next: string; label: string; variant: any }> = {
-  assigned: { next: "enroute", label: "Start driving", variant: "primary" },
-  enroute: { next: "completed", label: "Complete job", variant: "success" },
-  arrived: { next: "completed", label: "Complete job", variant: "success" },
-  in_progress: { next: "completed", label: "Complete job", variant: "success" },
+// "Start driving"  → enroute  (triggers on-my-way SMS to customer)
+// "I've Arrived"   → arrived  (manual fallback; geofence auto-arrives at 150m)
+// "Complete job"   → completed
+// NOTE: "Complete job" must NEVER appear while status is enroute — driver must arrive first.
+const FLOW: Record<string, { next: string; label: string; variant: any; hint?: string }> = {
+  assigned:    { next: "enroute",   label: "Start Driving",  variant: "primary" },
+  enroute:     { next: "arrived",   label: "I've Arrived",   variant: "primary",
+                 hint: "Auto-arrives when you're within 150m of the address. Tap if not auto-detected." },
+  arrived:     { next: "completed", label: "Complete Job",   variant: "success" },
+  in_progress: { next: "completed", label: "Complete Job",   variant: "success" },
 };
 
 // states where we keep pinging GPS (drives mileage + geofence auto-arrive/clock)
@@ -63,7 +77,14 @@ export default function JobDetail() {
   const pingTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const [msg, setMsg] = useState("");
   const [dispatchMsg, setDispatchMsg] = useState("");
+  const [driverNote, setDriverNote] = useState("");
+  const [savingNote, setSavingNote] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [showDebrief, setShowDebrief] = useState(false);
+  // collapsible section state
+  const [dispatchExpanded, setDispatchExpanded] = useState(false);
+  const [customerExpanded, setCustomerExpanded] = useState(false);
+  const [driverNoteExpanded, setDriverNoteExpanded] = useState(false);
 
   const job = useQuery({
     queryKey: ["job", id],
@@ -100,6 +121,24 @@ export default function JobDetail() {
       if (!res.ok) throw new Error("Failed");
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: ["job", id] }),
+  });
+
+  const toggleChecklist = useMutation({
+    mutationFn: async ({ index, done }: { index: number; done: boolean }) => {
+      const res = await fetch(`${API}/api/bookings/${id}/checklist`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ index, done }),
+      });
+      if (!res.ok) throw new Error("Failed");
+      return res.json() as Promise<{ checklist: any[] }>;
+    },
+    onSuccess: (data) => {
+      // optimistic update
+      qc.setQueryData(["job", id], (old: any) =>
+        old ? { ...old, checklistState: JSON.stringify(data.checklist) } : old
+      );
+    },
   });
 
   const directThread = useQuery({
@@ -140,7 +179,57 @@ export default function JobDetail() {
     },
   });
 
+  const saveDriverNote = async () => {
+    if (!driverNote.trim()) return;
+    setSavingNote(true);
+    try {
+      const res = await fetch(`${API}/api/bookings/${id}/driver-notes`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
+        body: JSON.stringify({ notes: driverNote.trim() }),
+      });
+      if (res.ok) {
+        qc.invalidateQueries({ queryKey: ["job", id] });
+        Alert.alert("Saved", "Your field note has been saved to the job record.");
+      } else {
+        Alert.alert("Error", "Could not save note. Try again.");
+      }
+    } catch {
+      Alert.alert("Error", "Network error. Try again.");
+    } finally {
+      setSavingNote(false);
+    }
+  };
+
+  // Live Activity / Dynamic Island — iOS 16.2+
+  const { updateEta } = useLiveActivity(
+    job.data
+      ? {
+          jobId: id ?? "",
+          clientName: job.data.customerName ?? job.data.clientName ?? "",
+          address: job.data.address ?? "",
+          status: job.data.status,
+          etaMins: job.data.etaMins ?? null,
+        }
+      : null
+  );
+
   // live location ping while enroute
+  // Pre-fill driver note textarea with any existing saved note
+  useEffect(() => {
+    if (job.data?.driverNotes && !driverNote) {
+      setDriverNote(job.data.driverNotes);
+    }
+  }, [job.data?.driverNotes]);
+
+  // Auto-expand dispatch if there are unread messages
+  useEffect(() => {
+    const unread = (directThread.data?.direct ?? []).filter(
+      (m: any) => m.senderRole === "dispatch" && !m.read
+    ).length;
+    if (unread > 0) setDispatchExpanded(true);
+  }, [directThread.data]);
+
   useEffect(() => {
     const status = job.data?.status;
     async function startPings() {
@@ -149,11 +238,16 @@ export default function JobDetail() {
       const ping = async () => {
         try {
           const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-          await fetch(`${API}/api/tracking/${id}/ping`, {
+          const res = await fetch(`${API}/api/tracking/${id}/ping`, {
             method: "POST",
             headers: { "Content-Type": "application/json", Authorization: `Bearer ${getToken()}` },
             body: JSON.stringify({ lat: loc.coords.latitude, lng: loc.coords.longitude }),
           });
+          // Update Live Activity ETA if server returns one
+          if (res.ok) {
+            const data = await res.json().catch(() => null);
+            if (data?.etaMins != null) updateEta(data.etaMins);
+          }
         } catch {}
       };
       ping();
@@ -291,6 +385,37 @@ export default function JobDetail() {
             <Text style={s.price}>{money(j.price)}</Text>
           </View>
 
+          {/* Job Progress Stepper */}
+          {!["completed","cancelled"].includes(j.status) && (
+            <View style={s.stepperCard}>
+              {[
+                { key: "assigned",    icon: <Car color={["assigned"].includes(j.status) ? C.brand : C.green} size={16} weight="fill" />,    label: "Assigned" },
+                { key: "enroute",     icon: <NavigationArrow color={["enroute"].includes(j.status) ? C.brand : (["arrived","in_progress","completed"].includes(j.status) ? C.green : C.muted)} size={16} weight="fill" />, label: "En Route" },
+                { key: "arrived",     icon: <MapPin color={["arrived","in_progress"].includes(j.status) ? C.brand : (["completed"].includes(j.status) ? C.green : C.muted)} size={16} weight="fill" />,    label: "On Site" },
+                { key: "completed",   icon: <CheckCircle color={j.status === "completed" ? C.green : C.muted} size={16} weight="fill" />, label: "Done" },
+              ].map((step, idx, arr) => {
+                const ORDERED = ["assigned","enroute","arrived","in_progress","completed"];
+                const curIdx = ORDERED.indexOf(j.status);
+                const stepIdx = ORDERED.indexOf(step.key);
+                const isDone = stepIdx < curIdx;
+                const isActive = step.key === j.status || (step.key === "arrived" && j.status === "in_progress");
+                return (
+                  <View key={step.key} style={{ flexDirection: "row", alignItems: "center", flex: idx < arr.length - 1 ? 1 : undefined }}>
+                    <View style={[s.stepDot, isDone && s.stepDotDone, isActive && s.stepDotActive]}>
+                      {step.icon}
+                    </View>
+                    <View style={{ alignItems: "center", position: "absolute", top: 28, left: -20, width: 60 }}>
+                      <Text style={[s.stepLabel, isActive && { color: C.brand, fontWeight: "700" }, isDone && { color: C.green }]}>{step.label}</Text>
+                    </View>
+                    {idx < arr.length - 1 && (
+                      <View style={[s.stepLine, isDone && s.stepLineDone]} />
+                    )}
+                  </View>
+                );
+              })}
+            </View>
+          )}
+
           {/* Customer */}
           <View style={s.block}>
             <View style={s.custRow}>
@@ -390,26 +515,189 @@ export default function JobDetail() {
             )}
           </View>
 
-          {/* Notes */}
+          {/* Staff Notes — internal, driver-only */}
+          {j.staffNotes ? (
+            <View style={[s.block, s.staffNotesBlock]}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 8 }}>
+                <Warning color="#f59e0b" size={16} weight="fill" />
+                <Text style={[s.blockTitle, { color: "#f59e0b" }]}>Staff Notes (Dispatcher Only)</Text>
+              </View>
+              <Text style={s.staffNotesText}>{j.staffNotes}</Text>
+            </View>
+          ) : null}
+
+          {/* Notes (customer-facing) */}
           {j.notes ? (
             <View style={s.block}>
-              <Text style={s.blockTitle}>Notes</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 8 }}>
+                <Note color={C.sub} size={14} weight="fill" />
+                <Text style={s.blockTitle}>Job Notes</Text>
+              </View>
               <Text style={s.notes}>{j.notes}</Text>
             </View>
           ) : null}
 
-          {/* Job fields */}
-          {fieldEntries.length > 0 && (
-            <View style={s.block}>
-              <Text style={s.blockTitle}>Details</Text>
-              {fieldEntries.map(([k, v]) => (
-                <View key={k} style={s.fieldRow}>
-                  <Text style={s.fieldKey}>{k}</Text>
-                  <Text style={s.fieldVal}>{String(v)}</Text>
-                </View>
-              ))}
+          {/* Rich Job Details */}
+          <View style={s.block}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 10 }}>
+              <Info color={C.sub} size={14} weight="fill" />
+              <Text style={s.blockTitle}>Job Details</Text>
             </View>
-          )}
+            {j.service?.name ? (
+              <View style={s.fieldRow}>
+                <Text style={s.fieldKey}>Service</Text>
+                <Text style={s.fieldVal}>{j.service.name}</Text>
+              </View>
+            ) : null}
+            {j.service?.description ? (
+              <View style={[s.fieldRow, { flexDirection: "column", gap: 4 }]}>
+                <Text style={s.fieldKey}>Description</Text>
+                <Text style={[s.fieldVal, { textAlign: "left", color: C.text, fontSize: 13 }]}>{j.service.description}</Text>
+              </View>
+            ) : null}
+            {j.priority && j.priority !== "normal" ? (
+              <View style={s.fieldRow}>
+                <Text style={s.fieldKey}>Priority</Text>
+                <Text style={[s.fieldVal, {
+                  color: j.priority === "urgent" ? "#ef4444" : j.priority === "high" ? "#f97316" : C.green,
+                  textTransform: "capitalize",
+                }]}>{j.priority}</Text>
+              </View>
+            ) : null}
+            {j.service?.durationMins ? (
+              <View style={s.fieldRow}>
+                <Text style={s.fieldKey}>Est. Duration</Text>
+                <Text style={s.fieldVal}>
+                  {j.service.durationMins >= 60
+                    ? `${Math.floor(j.service.durationMins / 60)}h ${j.service.durationMins % 60 > 0 ? `${j.service.durationMins % 60}m` : ""}`.trim()
+                    : `${j.service.durationMins} min`}
+                </Text>
+              </View>
+            ) : null}
+            {j.service?.category ? (
+              <View style={s.fieldRow}>
+                <Text style={s.fieldKey}>Category</Text>
+                <Text style={s.fieldVal}>{j.service.category}</Text>
+              </View>
+            ) : null}
+            {j.region ? (
+              <View style={s.fieldRow}>
+                <Text style={s.fieldKey}>Region/Tax</Text>
+                <Text style={s.fieldVal}>{j.region}</Text>
+              </View>
+            ) : null}
+          </View>
+
+          {/* Job fields (template custom fields) — typed rendering */}
+          {(() => {
+            // Prefer structured _customFields array for proper typed rendering
+            let customFieldDefs: any[] = [];
+            try { customFieldDefs = Array.isArray(fields._customFields) ? fields._customFields : []; } catch {}
+
+            // Render typed fields
+            if (customFieldDefs.length > 0) {
+              return (
+                <View style={s.block}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 8 }}>
+                    <Tag color={C.sub} size={14} weight="fill" />
+                    <Text style={s.blockTitle}>Job Instructions & Fields</Text>
+                  </View>
+                  {customFieldDefs.map((cf: any) => {
+                    const val = fields[cf.id] ?? fields[cf.label];
+                    if (cf.type === "instructions") {
+                      return (
+                        <View key={cf.id} style={[s.fieldRow, { flexDirection: "column", gap: 4, backgroundColor: "rgba(14,165,233,0.07)", borderRadius: 8, padding: 10, marginBottom: 4 }]}>
+                          <Text style={[s.fieldKey, { color: C.brand }]}>📋 Instructions</Text>
+                          <Text style={[s.fieldVal, { textAlign: "left", color: C.text, fontSize: 13, lineHeight: 20 }]}>{cf.body || cf.label || ""}</Text>
+                        </View>
+                      );
+                    }
+                    if (cf.type === "checkbox") {
+                      const checked = val === true || val === "true";
+                      return (
+                        <View key={cf.id} style={s.fieldRow}>
+                          <Text style={s.fieldKey}>{cf.label}</Text>
+                          <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                            {checked
+                              ? <CheckSquare color={C.green} size={16} weight="fill" />
+                              : <Square color={C.muted} size={16} />}
+                            <Text style={[s.fieldVal, { color: checked ? C.green : C.muted }]}>
+                              {checked ? "Yes" : (val != null && val !== "" ? String(val) : "Not set")}
+                            </Text>
+                          </View>
+                        </View>
+                      );
+                    }
+                    if (cf.type === "flat_fee") {
+                      if (cf.amount == null) return null;
+                      return (
+                        <View key={cf.id} style={s.fieldRow}>
+                          <Text style={s.fieldKey}>{cf.label}</Text>
+                          <Text style={[s.fieldVal, { color: C.brand }]}>${Number(cf.amount).toFixed(2)} flat fee</Text>
+                        </View>
+                      );
+                    }
+                    if (cf.type === "price_logic") {
+                      return (
+                        <View key={cf.id} style={s.fieldRow}>
+                          <Text style={s.fieldKey}>{cf.label}</Text>
+                          <Text style={[s.fieldVal, { color: C.brand }]}>
+                            ${cf.logicRate ?? 0}/{cf.logicUnit ?? "unit"}
+                            {val != null && val !== "" ? ` × ${val} = ${(Number(cf.logicRate || 0) * Number(val || 0)).toFixed(2)}` : ""}
+                          </Text>
+                        </View>
+                      );
+                    }
+                    if (cf.type === "notes" || cf.type === "text") {
+                      if (val == null || val === "") return null;
+                      return (
+                        <View key={cf.id} style={[s.fieldRow, { flexDirection: "column", gap: 4 }]}>
+                          <Text style={s.fieldKey}>{cf.label}</Text>
+                          <Text style={[s.fieldVal, { textAlign: "left", color: C.text, fontSize: 13 }]}>{String(val)}</Text>
+                        </View>
+                      );
+                    }
+                    if (cf.type === "number") {
+                      if (val == null || val === "") return null;
+                      return (
+                        <View key={cf.id} style={s.fieldRow}>
+                          <Text style={s.fieldKey}>{cf.label}</Text>
+                          <Text style={s.fieldVal}>{String(val)}</Text>
+                        </View>
+                      );
+                    }
+                    // fallback: show label + value as text
+                    if (val == null || val === "" || cf.type === "file") return null;
+                    return (
+                      <View key={cf.id} style={s.fieldRow}>
+                        <Text style={s.fieldKey}>{cf.label}</Text>
+                        <Text style={s.fieldVal}>{String(val)}</Text>
+                      </View>
+                    );
+                  })}
+                </View>
+              );
+            }
+
+            // Fallback: render flat key/value pairs (old format)
+            if (fieldEntries.length > 0) {
+              return (
+                <View style={s.block}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 7, marginBottom: 8 }}>
+                    <Tag color={C.sub} size={14} weight="fill" />
+                    <Text style={s.blockTitle}>Custom Fields</Text>
+                  </View>
+                  {fieldEntries.map(([k, v]) => (
+                    <View key={k} style={s.fieldRow}>
+                      <Text style={s.fieldKey}>{k}</Text>
+                      <Text style={s.fieldVal}>{String(v)}</Text>
+                    </View>
+                  ))}
+                </View>
+              );
+            }
+            return null;
+          })()}
 
           {/* Per-unit work & pay (tech-facing — never shown to the client) */}
           {unitLines.length > 0 && (
@@ -441,18 +729,30 @@ export default function JobDetail() {
             </View>
           )}
 
-          {/* Checklist */}
+          {/* Checklist — tappable */}
           {checklist.length > 0 && (
             <View style={s.block}>
-              <Text style={s.blockTitle}>Checklist</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
+                <Text style={s.blockTitle}>Checklist</Text>
+                <Text style={s.checkProgress}>
+                  {checklist.filter((i: any) => (typeof i === "object" ? i.done : false)).length}/{checklist.length}
+                </Text>
+              </View>
               {checklist.map((item: any, i: number) => {
                 const done = typeof item === "object" ? item.done : false;
                 const label = typeof item === "object" ? item.label || item.text : String(item);
                 return (
-                  <View key={i} style={s.checkRow}>
-                    {done ? <CheckSquare color={C.green} size={20} weight="fill" /> : <Square color={C.muted} size={20} />}
+                  <Pressable
+                    key={i}
+                    style={s.checkRow}
+                    onPress={() => toggleChecklist.mutate({ index: i, done: !done })}
+                    hitSlop={8}
+                  >
+                    {done
+                      ? <CheckSquare color={C.green} size={22} weight="fill" />
+                      : <Square color={C.muted} size={22} />}
                     <Text style={[s.checkTxt, done && { color: C.muted, textDecorationLine: "line-through" }]}>{label}</Text>
-                  </View>
+                  </Pressable>
                 );
               })}
             </View>
@@ -480,106 +780,202 @@ export default function JobDetail() {
             )}
           </View>
 
-          {/* Dispatch Direct Thread */}
-          <View style={[s.block, s.dispatchBlock]}>
-            <View style={s.dispatchHeader}>
-              <Headset color={C.cyan} size={16} weight="fill" />
-              <Text style={[s.blockTitle, { color: C.cyan }]}>Dispatch</Text>
-              {(directThread.data?.direct ?? []).filter(
-                (m: any) => m.senderRole === "dispatch" && !m.read,
-              ).length > 0 && (
-                <View style={s.unreadBadge}>
-                  <Text style={s.unreadTxt}>
-                    {(directThread.data?.direct ?? []).filter(
-                      (m: any) => m.senderRole === "dispatch" && !m.read,
-                    ).length}
-                  </Text>
-                </View>
-              )}
-            </View>
-            <View style={{ gap: 8, marginTop: 8 }}>
-              {(directThread.data?.direct ?? []).length === 0 ? (
-                <Text style={s.emptyPhoto}>No messages from dispatch yet.</Text>
-              ) : (
-                (directThread.data?.direct ?? []).map((m: any) => {
-                  const mine = m.senderRole === "tech";
-                  return (
-                    <View key={m.id} style={[s.bubble, mine ? s.bubbleMine : s.bubbleDispatch]}>
-                      {!mine && (
-                        <Text style={[s.bubbleName, { color: C.cyan }]}>
-                          {m.senderName || "Dispatch"}
-                        </Text>
-                      )}
-                      <Text style={[s.bubbleTxt, mine && { color: "#04121c" }]}>{m.body}</Text>
-                      <Text style={s.bubbleTime}>
-                        {new Date(m.createdAt).toLocaleTimeString([], {
-                          hour: "numeric",
-                          minute: "2-digit",
-                        })}
-                      </Text>
-                    </View>
-                  );
-                })
-              )}
-            </View>
-            <View style={s.msgInputRow}>
-              <TextInput
-                value={dispatchMsg}
-                onChangeText={setDispatchMsg}
-                placeholder="Message dispatch…"
-                placeholderTextColor={C.muted}
-                style={s.msgInput}
-                multiline
-              />
-              <Pressable
-                onPress={() => dispatchMsg.trim() && sendDispatch.mutate(dispatchMsg.trim())}
-                style={[s.sendBtn, { backgroundColor: C.cyan }, !dispatchMsg.trim() && { opacity: 0.5 }]}
-                disabled={!dispatchMsg.trim() || sendDispatch.isPending}
-              >
-                {sendDispatch.isPending ? (
-                  <ActivityIndicator color="#04121c" size="small" />
-                ) : (
-                  <PaperPlaneRight color="#04121c" size={18} weight="fill" />
+          {/* ─── Driver Field Notes → Office ─────────────────────────── */}
+          <View style={[s.block, s.driverNoteBlock]}>
+            <Pressable
+              style={s.collapsibleHeader}
+              onPress={() => setDriverNoteExpanded(v => !v)}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <PencilSimple color="#f59e0b" size={16} weight="fill" />
+                <Text style={[s.blockTitle, { color: "#f59e0b" }]}>Field Notes to Office</Text>
+                {!!j.driverNotes && (
+                  <View style={[s.unreadBadge, { backgroundColor: "#f59e0b22", borderColor: "#f59e0b" }]}>
+                    <Text style={[s.unreadTxt, { color: "#f59e0b" }]}>saved</Text>
+                  </View>
                 )}
-              </Pressable>
-            </View>
+              </View>
+              {driverNoteExpanded
+                ? <CaretUp color={C.muted} size={14} />
+                : <CaretDown color={C.muted} size={14} />}
+            </Pressable>
+            {!driverNoteExpanded && !!j.driverNotes && (
+              <Text style={s.collapsedPreview} numberOfLines={2}>{j.driverNotes}</Text>
+            )}
+            {driverNoteExpanded && (
+              <View style={{ marginTop: 10, gap: 10 }}>
+                <Text style={s.sectionHint}>
+                  These notes are saved to the job record and visible to dispatch and management.
+                </Text>
+                <TextInput
+                  value={driverNote}
+                  onChangeText={setDriverNote}
+                  placeholder="E.g. 'Access code is 4521. Client requested call before arrival next time.'"
+                  placeholderTextColor={C.muted}
+                  style={[s.msgInput, { minHeight: 90, paddingTop: 10 }]}
+                  multiline
+                  textAlignVertical="top"
+                />
+                <Pressable
+                  onPress={saveDriverNote}
+                  disabled={savingNote || !driverNote.trim()}
+                  style={[s.saveNoteBtn, (!driverNote.trim() || savingNote) && { opacity: 0.5 }]}
+                >
+                  {savingNote
+                    ? <ActivityIndicator color="#04121c" size="small" />
+                    : <Text style={s.saveNoteBtnTxt}>Save Note to Office</Text>}
+                </Pressable>
+              </View>
+            )}
           </View>
 
-          {/* Customer Messages */}
+          {/* ─── Dispatch Direct Thread ───────────────────────────────── */}
+          <View style={[s.block, s.dispatchBlock]}>
+            <Pressable
+              style={s.collapsibleHeader}
+              onPress={() => setDispatchExpanded(v => !v)}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Headset color={C.cyan} size={16} weight="fill" />
+                <Text style={[s.blockTitle, { color: C.cyan }]}>Dispatch</Text>
+                {(directThread.data?.direct ?? []).filter(
+                  (m: any) => m.senderRole === "dispatch" && !m.read,
+                ).length > 0 && (
+                  <View style={s.unreadBadge}>
+                    <Text style={s.unreadTxt}>
+                      {(directThread.data?.direct ?? []).filter(
+                        (m: any) => m.senderRole === "dispatch" && !m.read,
+                      ).length} new
+                    </Text>
+                  </View>
+                )}
+              </View>
+              {dispatchExpanded
+                ? <CaretUp color={C.muted} size={14} />
+                : <CaretDown color={C.muted} size={14} />}
+            </Pressable>
+            {/* Collapsed preview: show last message */}
+            {!dispatchExpanded && (directThread.data?.direct ?? []).length > 0 && (
+              <Text style={s.collapsedPreview} numberOfLines={1}>
+                {(directThread.data?.direct as any[])?.at(-1)?.body ?? ""}
+              </Text>
+            )}
+            {!dispatchExpanded && (directThread.data?.direct ?? []).length === 0 && (
+              <Text style={[s.collapsedPreview, { fontStyle: "italic" }]}>Tap to message dispatch</Text>
+            )}
+            {dispatchExpanded && (
+              <>
+                <View style={{ gap: 8, marginTop: 8 }}>
+                  {(directThread.data?.direct ?? []).length === 0 ? (
+                    <Text style={s.emptyPhoto}>No messages from dispatch yet.</Text>
+                  ) : (
+                    (directThread.data?.direct ?? []).map((m: any) => {
+                      const mine = m.senderRole === "tech";
+                      return (
+                        <View key={m.id} style={[s.bubble, mine ? s.bubbleMine : s.bubbleDispatch]}>
+                          {!mine && (
+                            <Text style={[s.bubbleName, { color: C.cyan }]}>
+                              {m.senderName || "Dispatch"}
+                            </Text>
+                          )}
+                          <Text style={[s.bubbleTxt, mine && { color: "#04121c" }]}>{m.body}</Text>
+                          <Text style={s.bubbleTime}>
+                            {new Date(m.createdAt).toLocaleTimeString([], {
+                              hour: "numeric",
+                              minute: "2-digit",
+                            })}
+                          </Text>
+                        </View>
+                      );
+                    })
+                  )}
+                </View>
+                <View style={s.msgInputRow}>
+                  <TextInput
+                    value={dispatchMsg}
+                    onChangeText={setDispatchMsg}
+                    placeholder="Message dispatch…"
+                    placeholderTextColor={C.muted}
+                    style={s.msgInput}
+                    multiline
+                  />
+                  <Pressable
+                    onPress={() => dispatchMsg.trim() && sendDispatch.mutate(dispatchMsg.trim())}
+                    style={[s.sendBtn, { backgroundColor: C.cyan }, !dispatchMsg.trim() && { opacity: 0.5 }]}
+                    disabled={!dispatchMsg.trim() || sendDispatch.isPending}
+                  >
+                    {sendDispatch.isPending ? (
+                      <ActivityIndicator color="#04121c" size="small" />
+                    ) : (
+                      <PaperPlaneRight color="#04121c" size={18} weight="fill" />
+                    )}
+                  </Pressable>
+                </View>
+              </>
+            )}
+          </View>
+
+          {/* ─── Customer Messages ────────────────────────────────────── */}
           <View style={s.block}>
-            <Text style={s.blockTitle}>Customer Messages</Text>
-            <View style={{ gap: 8, marginTop: 8 }}>
-              {(messages.data ?? []).length === 0 ? (
-                <Text style={s.emptyPhoto}>No messages yet.</Text>
-              ) : (
-                (messages.data ?? []).map((m) => {
-                  const mine = m.senderRole === "tech";
-                  return (
-                    <View key={m.id} style={[s.bubble, mine ? s.bubbleMine : s.bubbleThem]}>
-                      {!mine && <Text style={s.bubbleName}>{m.senderName || m.senderRole}</Text>}
-                      <Text style={[s.bubbleTxt, mine && { color: "#04121c" }]}>{m.body}</Text>
-                    </View>
-                  );
-                })
-              )}
-            </View>
-            <View style={s.msgInputRow}>
-              <TextInput
-                value={msg}
-                onChangeText={setMsg}
-                placeholder="Message customer…"
-                placeholderTextColor={C.muted}
-                style={s.msgInput}
-                multiline
-              />
-              <Pressable
-                onPress={() => msg.trim() && sendMsg.mutate(msg.trim())}
-                style={[s.sendBtn, !msg.trim() && { opacity: 0.5 }]}
-                disabled={!msg.trim() || sendMsg.isPending}
-              >
-                {sendMsg.isPending ? <ActivityIndicator color="#04121c" size="small" /> : <PaperPlaneRight color="#04121c" size={18} weight="fill" />}
-              </Pressable>
-            </View>
+            <Pressable
+              style={s.collapsibleHeader}
+              onPress={() => setCustomerExpanded(v => !v)}
+            >
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Buildings color={C.sub} size={16} weight="fill" />
+                <Text style={s.blockTitle}>Customer Messages</Text>
+                {(messages.data ?? []).length > 0 && (
+                  <Text style={s.threadCount}>{(messages.data ?? []).length}</Text>
+                )}
+              </View>
+              {customerExpanded
+                ? <CaretUp color={C.muted} size={14} />
+                : <CaretDown color={C.muted} size={14} />}
+            </Pressable>
+            {!customerExpanded && (messages.data ?? []).length > 0 && (
+              <Text style={s.collapsedPreview} numberOfLines={1}>
+                {(messages.data as any[]).at(-1)?.body ?? ""}
+              </Text>
+            )}
+            {!customerExpanded && (messages.data ?? []).length === 0 && (
+              <Text style={[s.collapsedPreview, { fontStyle: "italic" }]}>Tap to message client</Text>
+            )}
+            {customerExpanded && (
+              <>
+                <View style={{ gap: 8, marginTop: 8 }}>
+                  {(messages.data ?? []).length === 0 ? (
+                    <Text style={s.emptyPhoto}>No messages yet.</Text>
+                  ) : (
+                    (messages.data ?? []).map((m) => {
+                      const mine = m.senderRole === "tech";
+                      return (
+                        <View key={m.id} style={[s.bubble, mine ? s.bubbleMine : s.bubbleThem]}>
+                          {!mine && <Text style={s.bubbleName}>{m.senderName || m.senderRole}</Text>}
+                          <Text style={[s.bubbleTxt, mine && { color: "#04121c" }]}>{m.body}</Text>
+                        </View>
+                      );
+                    })
+                  )}
+                </View>
+                <View style={s.msgInputRow}>
+                  <TextInput
+                    value={msg}
+                    onChangeText={setMsg}
+                    placeholder="Message customer…"
+                    placeholderTextColor={C.muted}
+                    style={s.msgInput}
+                    multiline
+                  />
+                  <Pressable
+                    onPress={() => msg.trim() && sendMsg.mutate(msg.trim())}
+                    style={[s.sendBtn, !msg.trim() && { opacity: 0.5 }]}
+                    disabled={!msg.trim() || sendMsg.isPending}
+                  >
+                    {sendMsg.isPending ? <ActivityIndicator color="#04121c" size="small" /> : <PaperPlaneRight color="#04121c" size={18} weight="fill" />}
+                  </Pressable>
+                </View>
+              </>
+            )}
           </View>
 
           <View style={{ height: 90 }} />
@@ -594,15 +990,40 @@ export default function JobDetail() {
               loading={setStatus.isPending}
               onPress={() => {
                 if (action.next === "completed") {
-                  Alert.alert("Complete job", "Mark this job as completed?", [
-                    { text: "Cancel", style: "cancel" },
-                    { text: "Complete", onPress: () => setStatus.mutate("completed") },
-                  ]);
+                  // Show debrief summary before completing
+                  const unchecked = checklist.filter((i: any) => !(typeof i === "object" ? i.done : false)).length;
+                  const photoCount = photos.data?.length ?? 0;
+                  const onSiteMin = j.onSiteMinutes ?? 0;
+                  const timeStr = onSiteMin >= 60
+                    ? `${Math.floor(onSiteMin / 60)}h ${onSiteMin % 60}m`
+                    : onSiteMin > 0 ? `${onSiteMin} min` : null;
+
+                  const lines: string[] = [];
+                  if (timeStr) lines.push(`⏱ Time on site: ${timeStr}`);
+                  lines.push(`📸 Photos: ${photoCount}`);
+                  if (unchecked > 0) lines.push(`⚠️ ${unchecked} checklist item${unchecked > 1 ? "s" : ""} not done`);
+                  lines.push(`💰 Earning: ${money(j.price)}`);
+
+                  Alert.alert(
+                    "Complete job?",
+                    lines.join("\n"),
+                    [
+                      { text: "Go back", style: "cancel" },
+                      {
+                        text: "Confirm complete",
+                        style: "default",
+                        onPress: () => setStatus.mutate("completed"),
+                      },
+                    ]
+                  );
                 } else {
                   setStatus.mutate(action.next);
                 }
               }}
             />
+            {action.hint ? (
+              <Text style={s.footerHint}>{action.hint}</Text>
+            ) : null}
           </View>
         )}
         {j.status === "completed" && (
@@ -708,8 +1129,9 @@ const s = StyleSheet.create({
   unitTotalRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingTop: 10, marginTop: 2 },
   unitTotalLabel: { color: C.sub, fontSize: 13, fontWeight: "700" },
   unitTotalVal: { color: C.green, fontSize: 17, fontWeight: "900" },
-  checkRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 7 },
+  checkRow: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.border + "44" },
   checkTxt: { color: C.text, fontSize: 14, flex: 1 },
+  checkProgress: { color: C.muted, fontSize: 12, fontWeight: "700" },
   photoHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   photoBtn: { flexDirection: "row", alignItems: "center", gap: 6 },
   photoBtnTxt: { color: C.brand, fontSize: 13, fontWeight: "700" },
@@ -723,9 +1145,16 @@ const s = StyleSheet.create({
   bubbleTxt: { color: C.text, fontSize: 14, lineHeight: 19 },
   bubbleTime: { color: C.muted, fontSize: 10, marginTop: 3, opacity: 0.7 },
   dispatchBlock: { borderColor: "rgba(34,211,238,0.25)", backgroundColor: "rgba(34,211,238,0.04)" },
+  driverNoteBlock: { borderColor: "rgba(245,158,11,0.35)", backgroundColor: "rgba(245,158,11,0.04)" },
   dispatchHeader: { flexDirection: "row", alignItems: "center", gap: 6 },
   unreadBadge: { backgroundColor: C.cyan, borderRadius: 10, minWidth: 20, height: 20, alignItems: "center", justifyContent: "center", paddingHorizontal: 5, marginLeft: 4 },
   unreadTxt: { color: "#04121c", fontSize: 11, fontWeight: "800" },
+  collapsibleHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  collapsedPreview: { color: C.muted, fontSize: 12, marginTop: 6, lineHeight: 17 },
+  sectionHint: { color: C.muted, fontSize: 12, lineHeight: 17 },
+  saveNoteBtn: { backgroundColor: "#f59e0b", borderRadius: 12, paddingVertical: 11, paddingHorizontal: 20, alignItems: "center" },
+  saveNoteBtnTxt: { color: "#04121c", fontWeight: "700", fontSize: 14 },
+  threadCount: { backgroundColor: C.bg3, borderRadius: 10, minWidth: 20, height: 18, alignItems: "center", justifyContent: "center", paddingHorizontal: 6, color: C.muted, fontSize: 11, fontWeight: "700", textAlign: "center" },
   msgInputRow: { flexDirection: "row", alignItems: "flex-end", gap: 8, marginTop: 12 },
   msgInput: {
     flex: 1,
@@ -753,4 +1182,62 @@ const s = StyleSheet.create({
   },
   doneBanner: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8 },
   doneTxt: { color: C.green, fontSize: 14, fontWeight: "700" },
+  footerHint: { color: C.muted, fontSize: 12, textAlign: "center", marginTop: 8 },
+
+  // Staff notes (amber highlight block)
+  staffNotesBlock: {
+    borderColor: "rgba(245,158,11,0.4)",
+    backgroundColor: "rgba(245,158,11,0.07)",
+  },
+  staffNotesText: {
+    color: "#fbbf24",
+    fontSize: 14,
+    lineHeight: 21,
+  },
+
+  // Job progress stepper
+  stepperCard: {
+    flexDirection: "row",
+    alignItems: "center",
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 36,
+    backgroundColor: C.card,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  stepDot: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: C.bg3,
+    borderWidth: 2,
+    borderColor: C.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  stepDotActive: {
+    borderColor: C.brand,
+    backgroundColor: "rgba(14,165,233,0.15)",
+  },
+  stepDotDone: {
+    borderColor: C.green,
+    backgroundColor: "rgba(34,197,94,0.12)",
+  },
+  stepLine: {
+    flex: 1,
+    height: 2,
+    backgroundColor: C.border,
+    marginHorizontal: 2,
+  },
+  stepLineDone: {
+    backgroundColor: C.green,
+  },
+  stepLabel: {
+    color: C.muted,
+    fontSize: 10,
+    fontWeight: "600",
+    textAlign: "center",
+  },
 });

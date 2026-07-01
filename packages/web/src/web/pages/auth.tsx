@@ -42,20 +42,28 @@ export default function AuthPage({ mode }: { mode: "sign-in" | "sign-up" }) {
       if (isSignUp) {
         const { error } = await authClient.signUp.email(
           { name, email, password, role, phone } as any,
-          { onSuccess: captureToken },
+          {
+            onSuccess: (ctx) => {
+              captureToken(ctx);
+              // navigate AFTER token is written to localStorage
+              window.location.assign(dest(role));
+            },
+          },
         );
         if (error) throw new Error(error.message);
-        // hard navigation so the freshly-issued session is read on mount,
-        // avoiding the stale "no session" race in the route guard
-        window.location.assign(dest(role));
       } else {
         const { data, error } = await authClient.signIn.email(
           { email, password },
-          { onSuccess: captureToken },
+          {
+            onSuccess: (ctx) => {
+              captureToken(ctx);
+              // role comes from the outer data closure (resolved before onSuccess fires)
+              const r = ((data?.user as any)?.role ?? "customer") as Role;
+              window.location.assign(dest(r));
+            },
+          },
         );
         if (error) throw new Error(error.message);
-        const r = ((data?.user as any)?.role ?? "customer") as Role;
-        window.location.assign(dest(r));
       }
     } catch (err: any) {
       setError(err.message || "Something went wrong");

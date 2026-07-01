@@ -217,6 +217,8 @@ export const bookings = sqliteTable("bookings", {
   lat: real("lat").notNull().default(43.6532),
   lng: real("lng").notNull().default(-79.3832),
   notes: text("notes").notNull().default(""),
+  staffNotes: text("staff_notes").notNull().default(""), // internal notes to driver/technician only (not shown to customer)
+  driverNotes: text("driver_notes").notNull().default(""), // field notes written by driver/tech on site (visible to office)
   // JSON: filled template fields + checklist state
   fieldData: text("field_data").notNull().default("{}"),
   checklistState: text("checklist_state").notNull().default("[]"),
@@ -263,6 +265,9 @@ export const bookings = sqliteTable("bookings", {
   assignedAt: integer("assigned_at", { mode: "timestamp_ms" }),
   acceptedAt: integer("accepted_at", { mode: "timestamp_ms" }),
   declineReason: text("decline_reason").notNull().default(""),
+  // required skill matching for dispatch
+  requiredSkillClass: text("required_skill_class").notNull().default(""), // e.g. "HVAC" — filters techs on scheduler
+  requiredSkills: text("required_skills").notNull().default(""),          // csv of individual skill tags required
   // soft-delete: when set, the job is archived (excluded from active lists) but never lost
   deletedAt: integer("deleted_at", { mode: "timestamp_ms" }),
   createdAt: now(),
@@ -492,7 +497,7 @@ export const companySettings = sqliteTable("company_settings", {
   hours: text("hours").notNull().default(""), // JSON string: [{day,open,close}] or freeform
   services: text("services").notNull().default(""), // JSON string: string[]
   socials: text("socials").notNull().default(""), // JSON string: {facebook,instagram,...}
-  geofenceRadiusM: integer("geofence_radius_m").notNull().default(20), // auto-arrive radius from job address (meters)
+  geofenceRadiusM: integer("geofence_radius_m").notNull().default(150), // auto-arrive radius from job address (meters)
   website: text("website").notNull().default(""),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }),
   createdAt: now(),

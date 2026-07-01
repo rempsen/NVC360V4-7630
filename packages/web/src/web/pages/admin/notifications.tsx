@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, apiHeaders } from "../../lib/api";
 import { dismiss } from "../../lib/utils";
@@ -10,6 +10,7 @@ import {
   Bell, Webhook, ScrollText, Send, Plus, Trash2, Check, X, Smartphone,
   Mail, MessageSquare, Globe, RefreshCw, UserPlus, Copy, Sliders, Pencil,
   Eye, RotateCcw, Moon, ChevronRight, Sparkles, Image as ImageIcon, Palette, AlignLeft,
+  Bold, Italic, Link as LinkIcon, PenLine,
 } from "lucide-react";
 import { useWorkerNoun } from "../../lib/use-brand";
 const recipLabel = (r: { key: string; label: string }, noun: string) => (r.key === "tech" ? noun : r.label);
@@ -263,6 +264,216 @@ function EventDrawer({ event, label, onClose }: { event: string; label: string; 
   );
 }
 
+function MessageComposer({
+  value, fallback, vars, smsOn, contextLabel, saving,
+  onSave, onReset, onClose,
+}: {
+  value: string; fallback: string;
+  vars: { key: string; label: string }[];
+  smsOn: boolean; contextLabel: string; saving: boolean;
+  onSave: (v: string) => void;
+  onReset: () => void;
+  onClose: () => void;
+}) {
+  const [tpl, setTpl] = useState(value);
+  const [preview, setPreview] = useState<string>("");
+  const [tab, setTab] = useState<"write" | "preview">("write");
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  const doPreview = useMutation({
+    mutationFn: async (template: string) =>
+      (await api["notif-config"].preview.$post({ json: { template } })).json(),
+    onSuccess: (d: any) => setPreview(d.rendered),
+  });
+
+  const effective = tpl || fallback;
+  const charCount = effective.length;
+  const smsSegments = charCount === 0 ? 0 : Math.ceil(charCount / 160);
+  const dirty = value !== tpl;
+
+  const wrap = (before: string, after: string) => {
+    const ta = taRef.current;
+    if (!ta) return;
+    const start = ta.selectionStart;
+    const end = ta.selectionEnd;
+    const sel = tpl.slice(start, end);
+    const next = tpl.slice(0, start) + before + sel + after + tpl.slice(end);
+    setTpl(next);
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(start + before.length, start + before.length + sel.length);
+    });
+  };
+
+  const insertVar = (k: string) => {
+    const ta = taRef.current;
+    const pos = ta ? ta.selectionStart : tpl.length;
+    const token = `{{${k}}}`;
+    const next = tpl.slice(0, pos) + (pos > 0 && tpl[pos - 1] !== " " ? " " : "") + token + tpl.slice(pos);
+    setTpl(next);
+    requestAnimationFrame(() => ta?.focus());
+  };
+
+  useEffect(() => {
+    if (tab === "preview") doPreview.mutate(effective);
+  }, [tab]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4">
+      <div
+        className="flex w-full max-w-4xl flex-col rounded-2xl border border-white/10 bg-[#0d1117] shadow-2xl"
+        style={{ height: "min(88vh, 680px)" }}
+      >
+        {/* header */}
+        <div className="flex items-center justify-between border-b border-white/10 px-5 py-3.5">
+          <div>
+            <div className="text-sm font-semibold text-white">Edit message</div>
+            <div className="text-[11px] text-slate-500">{contextLabel}</div>
+          </div>
+          <button onClick={onClose} className="rounded-lg p-1.5 text-slate-400 hover:text-white hover:bg-white/5">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* tab bar */}
+        <div className="flex border-b border-white/10 px-5">
+          {(["write", "preview"] as const).map((t) => (
+            <button
+              key={t}
+              onClick={() => setTab(t)}
+              className={`border-b-2 px-4 py-2.5 text-xs font-semibold capitalize transition ${
+                tab === t
+                  ? "border-brand text-cyan-glow"
+                  : "border-transparent text-slate-500 hover:text-slate-300"
+              }`}
+            >
+              {t === "write" ? "Write" : "Preview"}
+            </button>
+          ))}
+        </div>
+
+        <div className="min-h-0 flex-1 overflow-hidden">
+          {tab === "write" ? (
+            <div className="flex h-full flex-col p-5 gap-3">
+              {/* toolbar */}
+              <div className="flex items-center gap-1 rounded-lg border border-white/10 bg-ink px-2 py-1.5">
+                <button
+                  onClick={() => wrap("**", "**")}
+                  title="Bold"
+                  className="rounded p-1.5 text-slate-400 hover:text-white hover:bg-white/5"
+                >
+                  <Bold className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  onClick={() => wrap("_", "_")}
+                  title="Italic"
+                  className="rounded p-1.5 text-slate-400 hover:text-white hover:bg-white/5"
+                >
+                  <Italic className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  onClick={() => wrap("[", "](url)")}
+                  title="Link"
+                  className="rounded p-1.5 text-slate-400 hover:text-white hover:bg-white/5"
+                >
+                  <LinkIcon className="h-3.5 w-3.5" />
+                </button>
+                <div className="mx-2 h-4 w-px bg-white/10" />
+                {smsOn && (
+                  <span className={`ml-auto font-mono text-[10px] ${charCount > 160 ? "text-amber-400" : "text-slate-500"}`}>
+                    {charCount} char{smsSegments > 1 ? ` · ${smsSegments} SMS segments` : ""}
+                  </span>
+                )}
+              </div>
+
+              {/* textarea */}
+              <textarea
+                ref={taRef}
+                value={tpl}
+                onChange={(e) => setTpl(e.target.value)}
+                placeholder={fallback || "Leave blank to use the default copy…"}
+                className={`${inputCls} flex-1 resize-none font-mono text-sm leading-relaxed`}
+                style={{ minHeight: 0 }}
+              />
+
+              {/* token chips */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Insert:</span>
+                {vars.map((v) => (
+                  <button
+                    key={v.key}
+                    onClick={() => insertVar(v.key)}
+                    title={v.label}
+                    className="rounded-md border border-white/10 bg-ink px-2 py-1 text-[11px] font-mono text-slate-300 hover:border-brand/40 hover:text-cyan-glow"
+                  >
+                    {`{{${v.key}}}`}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div className="h-full overflow-y-auto p-5">
+              {doPreview.isPending && (
+                <div className="flex items-center gap-2 text-sm text-slate-400">
+                  <Loader2 className="h-4 w-4 animate-spin" /> Rendering…
+                </div>
+              )}
+              {!doPreview.isPending && (
+                <div className="grid gap-4 md:grid-cols-3">
+                  {/* SMS bubble */}
+                  <div>
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">SMS</div>
+                    <div className="rounded-2xl bg-[#1c1c1e] p-3 text-sm text-white leading-relaxed max-w-xs shadow-inner">
+                      <div className="rounded-xl bg-[#2c2c2e] px-3 py-2 text-[13px] leading-snug">
+                        {preview || effective}
+                      </div>
+                    </div>
+                  </div>
+                  {/* In-app */}
+                  <div>
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">In-app</div>
+                    <div className="rounded-xl border border-brand/30 bg-brand/5 p-3 text-sm text-slate-200 leading-relaxed">
+                      {preview || effective}
+                    </div>
+                  </div>
+                  {/* Plain email */}
+                  <div>
+                    <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Plain email</div>
+                    <div className="rounded-xl border border-white/10 bg-ink p-3 font-mono text-[12px] text-slate-300 leading-relaxed whitespace-pre-wrap">
+                      {preview || effective}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* footer */}
+        <div className="flex items-center justify-between border-t border-white/10 px-5 py-3">
+          <button
+            onClick={() => { onReset(); setTpl(""); }}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-ink px-3 py-1.5 text-xs font-semibold text-slate-400 hover:text-white"
+          >
+            <RotateCcw className="h-3.5 w-3.5" /> Use default
+          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="rounded-lg border border-white/10 bg-ink px-4 py-1.5 text-xs font-semibold text-slate-400 hover:text-white"
+            >
+              Cancel
+            </button>
+            <BtnPrimary onClick={() => { onSave(tpl); onClose(); }} disabled={!dirty || saving}>
+              {saving ? "Saving…" : "Save message"}
+            </BtnPrimary>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function RecipientCard({
   rule, recipientLabel, fallback, vars, onSave, saving, eventLabel,
 }: {
@@ -270,8 +481,7 @@ function RecipientCard({
   vars: { key: string; label: string }[];
   onSave: (body: any) => void; saving: boolean; eventLabel: string;
 }) {
-  const [tpl, setTpl] = useState<string>(rule.template || "");
-  const [preview, setPreview] = useState<string>("");
+  const [composerOpen, setComposerOpen] = useState(false);
   const [emailOpen, setEmailOpen] = useState(false);
 
   const parsedDesign: EmailBlock[] = (() => {
@@ -279,20 +489,8 @@ function RecipientCard({
   })();
   const hasDesign = parsedDesign.length > 0;
 
-  // live preview via backend interpolation (sample data)
-  const doPreview = useMutation({
-    mutationFn: async (template: string) => (await api["notif-config"].preview.$post({ json: { template } })).json(),
-    onSuccess: (d: any) => setPreview(d.rendered),
-  });
-
-  const insertVar = (k: string) => {
-    const next = (tpl ? tpl + " " : "") + `{{${k}}}`;
-    setTpl(next);
-  };
-
-  const dirty = (rule.template || "") !== tpl;
+  const tpl: string = rule.template || "";
   const effective = tpl || fallback;
-  // email format: which body gets sent when the Email channel fires
   const emailMode: "html" | "text" = hasDesign ? "html" : "text";
   const smsOn = !!rule.sms;
   const charCount = effective.length;
@@ -321,7 +519,7 @@ function RecipientCard({
         </div>
       </div>
 
-      {/* ---- EMAIL: explicit format chooser, only when Email channel is enabled ---- */}
+      {/* EMAIL format chooser */}
       {rule.email && (
         <div className="mb-3 rounded-xl border border-brand/30 bg-brand/5 p-3">
           <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
@@ -344,8 +542,8 @@ function RecipientCard({
           {emailMode === "html" ? (
             <div className="flex flex-wrap items-center gap-2">
               <div className="min-w-0 flex-1 text-[11px] text-slate-400">
-                Sends a designed HTML email · <span className="text-slate-300">{parsedDesign.length} block{parsedDesign.length > 1 ? "s" : ""}</span>
-                {rule.emailSubject ? <> · subject “{rule.emailSubject}”</> : null}
+                Sends a designed HTML email &middot; <span className="text-slate-300">{parsedDesign.length} block{parsedDesign.length > 1 ? "s" : ""}</span>
+                {rule.emailSubject ? <> &middot; subject "{rule.emailSubject}"</> : null}
               </div>
               <button onClick={() => setEmailOpen(true)} className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-bold text-white hover:bg-brand-deep">
                 <Pencil className="h-3.5 w-3.5" /> Edit design
@@ -358,75 +556,50 @@ function RecipientCard({
         </div>
       )}
 
-      {/* ---- the plain-text message (SMS / in-app / fallback + plain email) ---- */}
-      <div className="mb-1.5 flex items-center justify-between">
-        <div className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-          Message text
-          <span className="ml-1.5 font-medium normal-case text-slate-600">
-            {[rule.sms && "SMS", rule.inApp && "in-app", rule.email && emailMode === "text" && "email"].filter(Boolean).join(" · ") || "fallback only"}
-          </span>
+      {/* message preview row + edit button */}
+      <div className="flex items-start gap-3 rounded-xl border border-white/5 bg-ink/60 px-3 py-2.5">
+        <div className="min-w-0 flex-1">
+          <div className="mb-0.5 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+            Message text
+            <span className="font-medium normal-case text-slate-600">
+              {[rule.sms && "SMS", rule.inApp && "in-app", rule.email && emailMode === "text" && "email"].filter(Boolean).join(" \u00b7 ") || "fallback only"}
+            </span>
+            {smsOn && (
+              <span className={`ml-auto font-mono text-[10px] ${charCount > 160 ? "text-amber-400" : "text-slate-500"}`}>
+                {charCount} char{smsSegments > 1 ? ` \u00b7 ${smsSegments} SMS` : ""}
+              </span>
+            )}
+          </div>
+          <p className={`line-clamp-2 text-sm leading-snug ${tpl ? "text-slate-200" : "italic text-slate-500"}`}>
+            {tpl || fallback || "No default copy."}
+          </p>
+          {!tpl && <p className="mt-0.5 text-[10px] text-slate-600">Using default copy</p>}
         </div>
-        {smsOn && (
-          <span className={`text-[10px] font-mono ${charCount > 160 ? "text-amber-400" : "text-slate-500"}`}>
-            {charCount} char{smsSegments > 1 ? ` · ${smsSegments} SMS` : ""}
-          </span>
-        )}
-      </div>
-      <div className="mb-2 flex flex-wrap items-center gap-1.5">
-        <span className="mr-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Insert:</span>
-        {vars.map((v) => (
-          <button
-            key={v.key}
-            onClick={() => insertVar(v.key)}
-            title={v.label}
-            className="rounded-md border border-white/10 bg-ink px-2 py-1 text-[11px] font-mono text-slate-300 hover:border-brand/40 hover:text-cyan-glow"
-          >
-            {`{{${v.key}}}`}
-          </button>
-        ))}
-      </div>
-
-      <textarea aria-label={fallback || "Custom message… leave blank to use the default copy."}
-        value={tpl}
-        onChange={(e) => setTpl(e.target.value)}
-        rows={3}
-        placeholder={fallback || "Custom message… leave blank to use the default copy."}
-        className={`${inputCls} font-mono text-xs leading-relaxed`}
-      />
-
-      <div className="mt-3 flex flex-wrap items-center gap-2">
         <button
-          onClick={() => doPreview.mutate(effective)}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-ink px-3 py-1.5 text-xs font-semibold text-slate-300 hover:text-cyan-glow"
+          onClick={() => setComposerOpen(true)}
+          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-white/10 bg-ink px-3 py-1.5 text-xs font-semibold text-slate-300 hover:border-brand/40 hover:text-cyan-glow"
         >
-          <Eye className="h-3.5 w-3.5" /> Preview
+          <PenLine className="h-3.5 w-3.5" /> Edit
         </button>
-        <button
-          onClick={() => setTpl("")}
-          disabled={!tpl}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-ink px-3 py-1.5 text-xs font-semibold text-slate-400 hover:text-white disabled:opacity-40"
-        >
-          <RotateCcw className="h-3.5 w-3.5" /> Use default
-        </button>
-        <div className="flex-1" />
-        <BtnPrimary onClick={() => onSave({ template: tpl })} disabled={!dirty || saving}>
-          {saving ? "Saving…" : dirty ? "Save copy" : "Saved"}
-        </BtnPrimary>
       </div>
 
-      {preview && (
-        <div className="mt-3 rounded-xl border border-brand/20 bg-brand/5 p-3">
-          <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-glow">Preview (sample data)</div>
-          <p className="text-sm leading-relaxed text-slate-200">{preview}</p>
-        </div>
-      )}
-      {!tpl && (
-        <p className="mt-2 text-[11px] text-slate-500">Using default copy. Type above to override.</p>
+      {composerOpen && (
+        <MessageComposer
+          value={tpl}
+          fallback={fallback}
+          vars={vars}
+          smsOn={smsOn}
+          contextLabel={`${eventLabel} \u2192 ${recipientLabel}`}
+          saving={saving}
+          onSave={(v) => onSave({ template: v })}
+          onReset={() => onSave({ template: "" })}
+          onClose={() => setComposerOpen(false)}
+        />
       )}
 
       {emailOpen && (
         <EmailEditor
-          contextLabel={`${eventLabel} → ${recipientLabel}`}
+          contextLabel={`${eventLabel} \u2192 ${recipientLabel}`}
           initialDesign={hasDesign ? parsedDesign : starterDesignForRecipient(rule.recipient, eventLabel)}
           initialSubject={rule.emailSubject || ""}
           saving={saving}
@@ -437,6 +610,7 @@ function RecipientCard({
     </div>
   );
 }
+
 
 /* token palette for default body templates (matches backend TEMPLATE_VARS) */
 const BODY_TOKENS: { key: string; label: string }[] = [

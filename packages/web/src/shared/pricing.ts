@@ -10,6 +10,8 @@
  */
 
 export type TimeUnit = "minute" | "hour";
+/** How many minutes are included free before billing starts (0 = none, 30, 60). */
+export type IncludedFreeMinutes = 0 | 30 | 60;
 
 export interface RateModel {
   flatRate: number;          // $ base charge
@@ -19,6 +21,10 @@ export interface RateModel {
   timeUnit: TimeUnit;        // minute | hour
   kmRate: number;            // $ per km after included km
   minCharge: number;         // optional floor for the subtotal (0 = none)
+  // ── tiered hourly pricing ──
+  freeMinutes: number;       // minutes included at no charge (0 | 30 | 60)
+  firstHourRate: number;     // $ for the first billable hour (0 = use timeRate)
+  additionalHourRate: number;// $ per hour after the first (0 = same as first)
 }
 
 export const EMPTY_RATE_MODEL: RateModel = {
@@ -29,6 +35,9 @@ export const EMPTY_RATE_MODEL: RateModel = {
   timeUnit: "hour",
   kmRate: 0,
   minCharge: 0,
+  freeMinutes: 0,
+  firstHourRate: 0,
+  additionalHourRate: 0,
 };
 
 export function parseRateModel(json: string | null | undefined): RateModel | null {
@@ -76,8 +85,31 @@ export function computeSubtotal(
     });
   }
 
-  // time overage
-  if (rm.timeRate > 0) {
+  // ── tiered hourly billing ──
+  const freeMin = rm.freeMinutes || 0;
+  const firstHrRate = rm.firstHourRate || 0;
+  const addlHrRate = rm.additionalHourRate || 0;
+  const useTiered = firstHrRate > 0 || addlHrRate > 0;
+
+  if (useTiered) {
+    const billableMin = Math.max(0, actualMinutes - freeMin);
+    if (billableMin > 0) {
+      const firstMin = Math.min(billableMin, 60);
+      const addlMin = Math.max(0, billableMin - 60);
+      const firstHrs = round(firstMin / 60);
+      const addlHrs = round(addlMin / 60);
+      if (firstHrRate > 0 && firstMin > 0) {
+        items.push({ label: "First hour", qty: firstHrs, unit: "hr", rate: firstHrRate, amount: round(firstHrs * firstHrRate) });
+      }
+      if (addlHrRate > 0 && addlMin > 0) {
+        items.push({ label: "Additional time", qty: addlHrs, unit: "hr", rate: addlHrRate, amount: round(addlHrs * addlHrRate) });
+      } else if (addlMin > 0 && firstHrRate > 0) {
+        // fallback: use firstHrRate for additional if additionalHourRate not set
+        items.push({ label: "Additional time", qty: addlHrs, unit: "hr", rate: firstHrRate, amount: round(addlHrs * firstHrRate) });
+      }
+    }
+  } else if (rm.timeRate > 0) {
+    // simple flat hourly / per-minute
     const billableMin = Math.max(0, actualMinutes - rm.includedMinutes);
     if (rm.timeUnit === "hour") {
       const hrs = round(billableMin / 60);
@@ -108,15 +140,23 @@ export function computeSubtotal(
 export function describeRateModel(rm: RateModel): string {
   const parts: string[] = [];
   if (rm.flatRate > 0) {
-    let s = `$${rm.flatRate.toFixed(2)} flat`;
+    let s = `${rm.flatRate.toFixed(2)} flat`;
     const inc: string[] = [];
     if (rm.includedMinutes) inc.push(`${rm.includedMinutes}m`);
     if (rm.includedKm) inc.push(`${rm.includedKm}km`);
     if (inc.length) s += ` (incl ${inc.join("/")})`;
     parts.push(s);
   }
-  if (rm.timeRate > 0) parts.push(`+$${rm.timeRate.toFixed(2)}/${rm.timeUnit === "hour" ? "hr" : "min"}`);
-  if (rm.kmRate > 0) parts.push(`+$${rm.kmRate.toFixed(2)}/km`);
+  const firstHrRate = rm.firstHourRate || 0;
+  const addlHrRate = rm.additionalHourRate || 0;
+  if (firstHrRate > 0 || addlHrRate > 0) {
+    if (rm.freeMinutes) parts.push(`${rm.freeMinutes}min free`);
+    if (firstHrRate > 0) parts.push(`${firstHrRate.toFixed(2)}/1st hr`);
+    if (addlHrRate > 0 && addlHrRate !== firstHrRate) parts.push(`${addlHrRate.toFixed(2)}/hr after`);
+  } else {
+    if (rm.timeRate > 0) parts.push(`+${rm.timeRate.toFixed(2)}/${rm.timeUnit === "hour" ? "hr" : "min"}`);
+  }
+  if (rm.kmRate > 0) parts.push(`+${rm.kmRate.toFixed(2)}/km`);
   if (!parts.length) return "No pricing set";
-  return parts.join(" ");
+  return parts.join(" · ");
 }
