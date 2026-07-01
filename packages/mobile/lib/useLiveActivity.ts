@@ -112,13 +112,14 @@ export function useLiveActivity(job: LiveActivityJobState | null | undefined) {
       updateSub?.remove?.();
       startSub?.remove?.();
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job?.jobId]);
 
   // Start / update / stop activity based on job status changes
   useEffect(() => {
     if (!LiveActivity || !job) return;
 
-    const { status, jobId } = job;
+    const { status } = job;
     const ACTIVE = ["assigned", "enroute", "arrived", "in_progress"];
     const isActive = ACTIVE.includes(status);
 
@@ -130,7 +131,7 @@ export function useLiveActivity(job: LiveActivityJobState | null | undefined) {
           activityIdRef.current = id;
           prevStatusRef.current = status;
         }
-      } catch (e) {
+      } catch {
         // Live Activities not supported (simulator, old iOS, etc.)
       }
       return;
@@ -153,6 +154,7 @@ export function useLiveActivity(job: LiveActivityJobState | null | undefined) {
         prevStatusRef.current = null;
       } catch {}
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job?.status, job?.etaMins, job?.jobId]);
 
   /** Call this on each GPS ping to update ETA countdown in real time */

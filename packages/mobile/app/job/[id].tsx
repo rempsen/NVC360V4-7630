@@ -40,7 +40,6 @@ import {
   Info,
   Note,
   Tag,
-  Timer,
   Car,
   CheckCircle,
   PencilSimple,
@@ -80,7 +79,7 @@ export default function JobDetail() {
   const [driverNote, setDriverNote] = useState("");
   const [savingNote, setSavingNote] = useState(false);
   const [uploading, setUploading] = useState(false);
-  const [showDebrief, setShowDebrief] = useState(false);
+  const [_showDebrief, _setShowDebrief] = useState(false);
   // collapsible section state
   const [dispatchExpanded, setDispatchExpanded] = useState(false);
   const [customerExpanded, setCustomerExpanded] = useState(false);
@@ -220,7 +219,8 @@ export default function JobDetail() {
     if (job.data?.driverNotes && !driverNote) {
       setDriverNote(job.data.driverNotes);
     }
-  }, [job.data?.driverNotes]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [job.data?.driverNotes, driverNote]);
 
   // Auto-expand dispatch if there are unread messages
   useEffect(() => {
@@ -258,6 +258,7 @@ export default function JobDetail() {
       if (pingTimer.current) clearInterval(pingTimer.current);
       pingTimer.current = null;
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [job.data?.status, id]);
 
   const navigate = useCallback(() => {
