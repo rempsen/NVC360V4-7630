@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute } from "wouter";
 import { api } from "../lib/api";
@@ -446,6 +446,7 @@ export default function TrackPublic() {
                         {reviewRating > 0 && (
                           <>
                             <textarea
+                              aria-label="Review comments"
                               value={reviewComment}
                               onChange={(e) => setReviewComment(e.target.value)}
                               placeholder="Any comments? (optional)"

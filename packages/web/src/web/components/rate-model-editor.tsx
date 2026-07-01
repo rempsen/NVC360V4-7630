@@ -41,7 +41,8 @@ function MoneyInput({ label, val, onSet, placeholder }: {
   );
 }
 
-function TextInput({ label, val, onSet, placeholder }: {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+function _TextInput({ label, val, onSet, placeholder }: {
   label: string; val: string; onSet: (s: string) => void; placeholder?: string;
 }) {
   return (

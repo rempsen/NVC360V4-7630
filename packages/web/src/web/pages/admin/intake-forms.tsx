@@ -454,10 +454,10 @@ function FieldRow({ f, sections, onPatch, onRemove, onMoveUp, onMoveDown }: {
           </select>
         )}
         <label className="flex shrink-0 items-center gap-1 text-[11px] text-slate-400" title="Show on form">
-          <input type="checkbox" disabled={f.fixed} checked={f.enabled} onChange={() => onPatch({ enabled: !f.enabled })} className="h-3.5 w-3.5 accent-cyan-500 disabled:opacity-40" /> Show
+          <input type="checkbox" aria-label="Show on form" disabled={f.fixed} checked={f.enabled} onChange={() => onPatch({ enabled: !f.enabled })} className="h-3.5 w-3.5 accent-cyan-500 disabled:opacity-40" /> Show
         </label>
         <label className="flex shrink-0 items-center gap-1 text-[11px] text-slate-400" title="Required">
-          <input type="checkbox" disabled={!f.enabled} checked={f.required} onChange={() => onPatch({ required: !f.required })} className="h-3.5 w-3.5 accent-cyan-500 disabled:opacity-30" /> Req
+          <input type="checkbox" aria-label="Required field" disabled={!f.enabled} checked={f.required} onChange={() => onPatch({ required: !f.required })} className="h-3.5 w-3.5 accent-cyan-500 disabled:opacity-30" /> Req
         </label>
         <button type="button" onClick={() => setOpen((o) => !o)} className="shrink-0 rounded-md p-1 text-slate-500 hover:text-white" aria-label="More options">
           {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}

@@ -9,8 +9,8 @@ import { Modal, Field, inputCls, BtnPrimary, BtnGhost, ConfirmModal } from "../.
 import {
   Bell, Webhook, ScrollText, Send, Plus, Trash2, Check, X, Smartphone,
   Mail, MessageSquare, Globe, RefreshCw, UserPlus, Copy, Sliders, Pencil,
-  Eye, RotateCcw, Moon, ChevronRight, Sparkles, Image as ImageIcon, Palette, AlignLeft,
-  Bold, Italic, Link as LinkIcon, PenLine,
+  RotateCcw, Moon, Sparkles, Image as ImageIcon, Palette, AlignLeft,
+  Bold, Italic, Link as LinkIcon, PenLine, Loader2,
 } from "lucide-react";
 import { useWorkerNoun } from "../../lib/use-brand";
 const recipLabel = (r: { key: string; label: string }, noun: string) => (r.key === "tech" ? noun : r.label);
@@ -314,8 +314,13 @@ function MessageComposer({
     requestAnimationFrame(() => ta?.focus());
   };
 
+  // Use refs so we can access latest values without adding to deps
+  const _doPreviewRef = useRef(doPreview);
+  _doPreviewRef.current = doPreview;
+  const _effectiveRef = useRef(effective);
+  _effectiveRef.current = effective;
   useEffect(() => {
-    if (tab === "preview") doPreview.mutate(effective);
+    if (tab === "preview") _doPreviewRef.current.mutate(_effectiveRef.current);
   }, [tab]);
 
   return (
@@ -389,6 +394,7 @@ function MessageComposer({
               {/* textarea */}
               <textarea
                 ref={taRef}
+                aria-label="Message template"
                 value={tpl}
                 onChange={(e) => setTpl(e.target.value)}
                 placeholder={fallback || "Leave blank to use the default copy…"}

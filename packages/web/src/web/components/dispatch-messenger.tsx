@@ -8,7 +8,6 @@ import {
   X,
   Send,
   ChevronLeft,
-  Minus,
   Search,
   Megaphone,
   Users,
@@ -173,9 +172,9 @@ function BroadcastView({
       <div className="flex-1 space-y-4 overflow-y-auto p-4">
         {/* target selector */}
         <div>
-          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <p className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-400">
             Send to
-          </label>
+          </p>
           <div className="relative">
             <button
               onClick={() => setDropOpen((o) => !o)}
@@ -291,10 +290,11 @@ function BroadcastView({
 
         {/* message */}
         <div>
-          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <label htmlFor="broadcast-msg" className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-slate-400">
             Message
           </label>
           <textarea
+            id="broadcast-msg"
             aria-label="Broadcast message"
             value={body}
             onChange={(e) => setBody(e.target.value)}

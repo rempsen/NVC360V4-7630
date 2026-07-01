@@ -212,7 +212,7 @@ export default function IntakeForm() {
           <div className="space-y-1.5">
             {(f.options || []).map((o) => (
               <label key={o} className="flex items-center gap-2 text-sm text-slate-700">
-                <input type="radio" name={f.key} value={o} checked={v[f.key] === o} onChange={() => set(f.key, o)} required={req} style={{ accentColor: brand }} />
+                <input type="radio" aria-label={String(o)} name={f.key} value={o} checked={v[f.key] === o} onChange={() => set(f.key, o)} required={req} style={{ accentColor: brand }} />
                 {o}
               </label>
             ))}
@@ -231,7 +231,7 @@ export default function IntakeForm() {
           <div className="space-y-1.5">
             {(f.options || []).map((o) => (
               <label key={o} className="flex items-center gap-2 text-sm text-slate-700">
-                <input type="checkbox" checked={sel.includes(o)} onChange={() => toggle(o)} style={{ accentColor: brand }} />
+                <input type="checkbox" aria-label={String(o)} checked={sel.includes(o)} onChange={() => toggle(o)} style={{ accentColor: brand }} />
                 {o}
               </label>
             ))}

@@ -259,7 +259,7 @@ export async function buildJobPdf(
     }
 
     // Attempt to embed actual images (best-effort: skip on failure)
-    let imgY = y;
+    let _imgY = y; void _imgY;
     for (const ph of photos) {
       try {
         const resp = await fetch(ph.url);

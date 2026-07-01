@@ -240,6 +240,7 @@ export default function RiderActive() {
             </div>
           </div>
           <textarea
+            aria-label="Decline reason"
             value={declineReason}
             onChange={(e) => setDeclineReason(e.target.value)}
             placeholder="Reason (optional)"

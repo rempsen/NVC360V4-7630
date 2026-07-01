@@ -894,6 +894,7 @@ export function WorkOrderModal({
                 {/* search */}
                 <input
                   type="text"
+                  aria-label={`Search ${noun.toLowerCase()}s`}
                   placeholder={`Search ${noun.toLowerCase()}s…`}
                   value={techFilter}
                   onChange={(e) => setTechFilter(e.target.value)}
@@ -1199,6 +1200,7 @@ function JobPhotosPanel({ bookingId }: { bookingId: string }) {
             ref={fileRef}
             type="file"
             accept="image/*"
+            aria-label="Upload job photo"
             className="sr-only"
             onChange={(e) => { const f = e.target.files?.[0]; if (f) handleUpload(f); e.target.value = ""; }}
             disabled={uploading}
@@ -1237,28 +1239,41 @@ function JobPhotosPanel({ bookingId }: { bookingId: string }) {
 
       {/* Lightbox */}
       {lightbox && (
-        <div
-          role="button"
-          tabIndex={0}
-          className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 p-4 backdrop-blur-sm"
-          onClick={() => setLightbox(null)}
-          onKeyDown={(e) => { if (e.key === "Escape" || e.key === "Enter") setLightbox(null); }}
+        <dialog
+          open
+          aria-label="Job photo viewer"
+          onCancel={() => setLightbox(null)}
+          className="fixed inset-0 z-[9999] m-0 flex h-full w-full max-h-none max-w-none items-center justify-center bg-black/90 p-4 backdrop-blur-sm border-none"
         >
+          {/* Invisible backdrop — click to dismiss */}
+          <button
+            type="button"
+            aria-label="Close photo viewer"
+            onClick={() => setLightbox(null)}
+            className="fixed inset-0 h-full w-full cursor-default border-none bg-transparent"
+          />
+          {/* X close */}
           <button
             type="button"
             onClick={() => setLightbox(null)}
-            className="absolute right-4 top-4 grid h-9 w-9 place-items-center rounded-full bg-white/10 text-white hover:bg-white/20"
+            className="absolute right-4 top-4 z-10 grid h-9 w-9 place-items-center rounded-full bg-white/10 text-white hover:bg-white/20"
           >
             <X className="h-5 w-5" />
           </button>
-          <img
-            src={lightbox}
-            alt="Job photo"
-            className="max-h-[90vh] max-w-[90vw] rounded-xl object-contain shadow-2xl"
+          {/* Image — above backdrop */}
+          <button
+            type="button"
             onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => e.stopPropagation()}
-          />
-        </div>
+            className="relative z-10 border-none bg-transparent p-0 cursor-default"
+            aria-label="Full size photo"
+          >
+            <img
+              src={lightbox}
+              alt="Full size view"
+              className="max-h-[90vh] max-w-[90vw] rounded-xl object-contain shadow-2xl"
+            />
+          </button>
+        </dialog>
       )}
     </div>
   );

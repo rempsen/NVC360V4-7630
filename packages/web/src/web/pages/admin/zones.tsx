@@ -8,7 +8,7 @@ import { FullLoader } from "../../components/loader";
 import { PageWrap } from "../../components/brand";
 import { PageHead } from "./shell";
 import { Modal, Field, inputCls, BtnPrimary, BtnGhost, ConfirmModal } from "../../components/modal";
-import { MapPin, Plus, Pencil, Trash2, MousePointer2, Check, X, Pentagon, Square, Circle } from "lucide-react";
+import { MapPin, Pencil, Trash2, MousePointer2, Check, X, Pentagon, Square, Circle } from "lucide-react";
 import { circleToPolygon, rectToPolygon } from "../../../shared/zone-utils";
 
 type LatLng = [number, number];
@@ -62,7 +62,7 @@ export default function AdminZones() {
     queryKey: ["settings"],
     queryFn: async () => (await api.settings.$get()).json(),
   });
-  const companyCenter: LatLng = useMemo(() => {
+  const _companyCenter: LatLng = useMemo(() => {
     const s = (settingsQ.data as any)?.settings;
     if (s?.lat && s?.lng && Math.abs(s.lat) > 0.001) return [s.lat, s.lng];
     return FALLBACK_CENTER;

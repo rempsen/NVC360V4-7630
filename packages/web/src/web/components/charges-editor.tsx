@@ -11,7 +11,7 @@
  */
 
 import { useState } from "react";
-import { Clock, DollarSign, Hash, Plus, Trash2, CheckCircle } from "lucide-react";
+import { Clock, DollarSign, Hash, Trash2, CheckCircle } from "lucide-react";
 import { money } from "../lib/utils";
 
 // ── Types ─────────────────────────────────────────────────────────────────────

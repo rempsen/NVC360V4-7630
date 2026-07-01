@@ -35,7 +35,8 @@ function makeJwt(privateKey: string): string {
   const now = Math.floor(Date.now() / 1000);
   const header = Buffer.from(JSON.stringify({ alg: "ES256", kid: KEY_ID })).toString("base64url");
   const payload = Buffer.from(JSON.stringify({ iss: TEAM_ID, iat: now })).toString("base64url");
-  const sign = crypto.createSign("sha256WithRSAEncryption");
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const _sign = crypto.createSign("sha256WithRSAEncryption");
   // APNs uses EC key, so we use createSign with ECDSA
   const ecSign = crypto.createSign("SHA256");
   ecSign.update(`${header}.${payload}`);
