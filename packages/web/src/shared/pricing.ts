@@ -140,7 +140,7 @@ export function computeSubtotal(
 export function describeRateModel(rm: RateModel): string {
   const parts: string[] = [];
   if (rm.flatRate > 0) {
-    let s = `${rm.flatRate.toFixed(2)} flat`;
+    let s = `$${rm.flatRate.toFixed(2)} flat`;
     const inc: string[] = [];
     if (rm.includedMinutes) inc.push(`${rm.includedMinutes}m`);
     if (rm.includedKm) inc.push(`${rm.includedKm}km`);
@@ -151,12 +151,12 @@ export function describeRateModel(rm: RateModel): string {
   const addlHrRate = rm.additionalHourRate || 0;
   if (firstHrRate > 0 || addlHrRate > 0) {
     if (rm.freeMinutes) parts.push(`${rm.freeMinutes}min free`);
-    if (firstHrRate > 0) parts.push(`${firstHrRate.toFixed(2)}/1st hr`);
-    if (addlHrRate > 0 && addlHrRate !== firstHrRate) parts.push(`${addlHrRate.toFixed(2)}/hr after`);
+    if (firstHrRate > 0) parts.push(`$${firstHrRate.toFixed(2)}/1st hr`);
+    if (addlHrRate > 0 && addlHrRate !== firstHrRate) parts.push(`$${addlHrRate.toFixed(2)}/hr after`);
   } else {
-    if (rm.timeRate > 0) parts.push(`+${rm.timeRate.toFixed(2)}/${rm.timeUnit === "hour" ? "hr" : "min"}`);
+    if (rm.timeRate > 0) parts.push(`+$${rm.timeRate.toFixed(2)}/${rm.timeUnit === "hour" ? "hr" : "min"}`);
   }
-  if (rm.kmRate > 0) parts.push(`+${rm.kmRate.toFixed(2)}/km`);
+  if (rm.kmRate > 0) parts.push(`+$${rm.kmRate.toFixed(2)}/km`);
   if (!parts.length) return "No pricing set";
   return parts.join(" · ");
 }
