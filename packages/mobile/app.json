@@ -2,7 +2,7 @@
   "expo": {
     "icon": "./assets/icon.png",
     "android": {
-      "package": "com.nvc360.uberize2",
+      "package": "com.nvc360.uberize",
       "permissions": [
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION",
@@ -28,7 +28,7 @@
       }
     },
     "ios": {
-      "bundleIdentifier": "com.nvc360.uberize2",
+      "bundleIdentifier": "com.nvc360.uberize",
       "appleTeamId": "86S82A9ZPS",
       "supportsTablet": true,
       "infoPlist": {
