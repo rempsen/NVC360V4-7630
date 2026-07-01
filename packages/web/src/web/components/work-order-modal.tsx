@@ -32,7 +32,6 @@ import { ChargesEditor, chargesSummary, type Charge } from "./charges-editor";
 import {
   EMPTY_RATE_MODEL,
   parseRateModel,
-  computeSubtotal,
   type RateModel,
 } from "../../shared/pricing";
 import {
@@ -460,7 +459,7 @@ export function WorkOrderModal({
       .reduce((s, f) => s + (f.amount ?? 0), 0);
 
     // charges from ChargesEditor (flat fee + per-unit; hourly billed at job time)
-    const { clientTotal: chargesClientTotal, techTotal: chargesTechTotal } = chargesSummary(charges);
+    const { clientTotal: _chargesClientTotal, techTotal: chargesTechTotal } = chargesSummary(charges);
     // only flat_fee and per_unit have known amounts; hourly = 0 until job done
     const chargesKnown = charges
       .filter((c) => c.type !== "hourly")
@@ -706,6 +705,29 @@ export function WorkOrderModal({
     );
   }
   function removeLine(itemId: string) {
+    setLineItems((prev) => prev.filter((p) => p.itemId !== itemId));
+  }
+
+  function addUnitLine() {
+    const li = buildUnitLineItem({ name: "", unit: "sq/ft", qty: 0, unitPrice: 0, unitPayRate: 0 });
+    setLineItems((prev) => [...prev, li]);
+  }
+  function changeUnitLine(itemId: string, patch: Partial<{ name: string; unit: string; qty: number; unitPrice: number; unitPayRate: number; taxable: boolean }>) {
+    setLineItems((prev) =>
+      prev.map((l) => {
+        if (l.itemId !== itemId) return l;
+        const next = { ...l };
+        if (patch.name !== undefined) next.name = patch.name;
+        if (patch.unit !== undefined) next.unit = patch.unit;
+        if (patch.qty !== undefined) { next.qty = patch.qty; next.price = Math.round((next.unitPrice || 0) * patch.qty * 100) / 100; next.cost = Math.round((next.unitCost || 0) * patch.qty * 100) / 100; }
+        if (patch.unitPrice !== undefined) { next.unitPrice = patch.unitPrice; next.price = Math.round(patch.unitPrice * (next.qty || 0) * 100) / 100; }
+        if (patch.unitPayRate !== undefined) { next.unitCost = patch.unitPayRate; next.cost = Math.round(patch.unitPayRate * (next.qty || 0) * 100) / 100; }
+        if (patch.taxable !== undefined) next.taxable = patch.taxable;
+        return next;
+      }),
+    );
+  }
+  function removeUnitLine(itemId: string) {
     setLineItems((prev) => prev.filter((p) => p.itemId !== itemId));
   }
 
@@ -988,6 +1010,17 @@ export function WorkOrderModal({
           />
         </div>
 
+        {/* ── Per-unit line items (charge + tech pay by measured unit) ── */}
+        <div className="sm:col-span-2">
+          <UnitLineItems
+            lines={lineItems.filter((l) => l.kind === "unit")}
+            workerNoun="Technician"
+            onAdd={addUnitLine}
+            onChange={changeUnitLine}
+            onRemove={removeUnitLine}
+          />
+        </div>
+
         {/* ── Charges (flat fee / hourly / per-unit) ── */}
         <div className="sm:col-span-2">
           <ChargesEditor charges={charges} onChange={setCharges} />
@@ -1205,8 +1238,11 @@ function JobPhotosPanel({ bookingId }: { bookingId: string }) {
       {/* Lightbox */}
       {lightbox && (
         <div
+          role="button"
+          tabIndex={0}
           className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/90 p-4 backdrop-blur-sm"
           onClick={() => setLightbox(null)}
+          onKeyDown={(e) => { if (e.key === "Escape" || e.key === "Enter") setLightbox(null); }}
         >
           <button
             type="button"
@@ -1220,6 +1256,7 @@ function JobPhotosPanel({ bookingId }: { bookingId: string }) {
             alt="Job photo"
             className="max-h-[90vh] max-w-[90vw] rounded-xl object-contain shadow-2xl"
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
           />
         </div>
       )}
