@@ -161,9 +161,16 @@ const app = new Hono<{ Variables: Variables }>()
     const key = decodeURIComponent(c.req.param("key"));
     const obj = await getObjectBody(key);
     if (!obj) return c.json({ message: "Not found" }, 404);
-    return new Response(obj.body, {
+    // Content-Length must be set explicitly — without it, HEAD requests (which
+    // many email clients / image proxies send to validate an image before
+    // rendering it, e.g. Gmail's image proxy) came back as `content-length: 0`
+    // even though GET returned the full body. That 0-length HEAD response is
+    // exactly why tenant header logos were intermittently rendering as broken
+    // images in real inboxes despite looking fine in the in-app preview.
+    return new Response(c.req.method === "HEAD" ? null : obj.body, {
       headers: {
         "Content-Type": obj.contentType,
+        "Content-Length": String(obj.body.byteLength),
         "Cache-Control": "public, max-age=31536000, immutable",
       },
     });

@@ -7,6 +7,7 @@ import {
   Type, AlignLeft, MousePointerClick, Image as ImageIcon, Minus, MoveVertical,
   Table, Trash2, ChevronUp, ChevronDown, Plus, Eye, Send, Save, BookMarked,
   X, Smartphone, Monitor, Sparkles, GripVertical, Bold, Italic, Link as LinkIcon,
+  ImagePlus,
 } from "lucide-react";
 import { useWorkerNoun } from "../lib/use-brand";
 
@@ -159,6 +160,7 @@ export function EmailEditor({
             <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Subject line</div>
             <input aria-label="e.g. {{company}}: your job update" className={`${inputCls} text-sm`} value={subject} onChange={(e) => setSubject(e.target.value)} placeholder="e.g. {{company}}: your job update" />
           </div>
+          <HeaderLogoPanel onChange={() => render.mutate(blocks)} />
           <div className="min-h-0 flex-1 overflow-y-auto p-3">
             <div className="mb-2 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Blocks</div>
             <div className="space-y-1.5">
@@ -238,6 +240,90 @@ export function EmailEditor({
 
       {showLibrary && <TemplateLibrary onPick={(d, s) => { setBlocks(ensureIds(d)); if (s) setSubject(s); setShowLibrary(false); }} onClose={() => setShowLibrary(false)} />}
       {showSaveTpl && <SaveTemplateModal onSave={(name, description) => saveTpl.mutate({ name, description })} saving={saveTpl.isPending} onClose={() => setShowSaveTpl(false)} />}
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------------------------
+ * Header logo — separate from body blocks on purpose.
+ *
+ * This is the logo shown in the colored header bar at the very top of every
+ * branded email (see renderEmailDesign's brandMark in email-render.ts). It is
+ * saved once on the tenant's notification channel config (emailLogoUrl) and
+ * then automatically applied to every email this company sends — the header,
+ * the Email Designer, and the raw event templates all read the same value.
+ * No need to drop an Image block into the body to get a logo at the top.
+ * -------------------------------------------------------------------------- */
+function HeaderLogoPanel({ onChange }: { onChange: () => void }) {
+  const qc = useQueryClient();
+  const [uploading, setUploading] = useState(false);
+  const [urlDraft, setUrlDraft] = useState("");
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const cfg = useQuery({
+    queryKey: ["notif-channels"],
+    queryFn: async () => (await api["notif-config"].channels.$get()).json(),
+  });
+  const logo = (cfg.data as any)?.channels?.emailLogoUrl || "";
+
+  const saveLogo = useMutation({
+    mutationFn: async (emailLogoUrl: string) => (await api["notif-config"].channels.$patch({ json: { emailLogoUrl } })).json(),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ["notif-channels"] }); onChange(); },
+  });
+
+  const upload = async (file: File) => {
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/notif-config/email/logo", { method: "POST", body: fd, credentials: "include", headers: apiHeaders() });
+      const d = await res.json();
+      // /email/logo already persists it on the channel config server-side —
+      // just refresh our local view so the panel + live preview pick it up.
+      if (d.url) { qc.invalidateQueries({ queryKey: ["notif-channels"] }); onChange(); }
+    } finally { setUploading(false); }
+  };
+
+  return (
+    <div className="border-b border-white/5 p-3">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+        <ImagePlus className="h-3 w-3" /> Header logo
+      </div>
+      <p className="mb-2 text-[10px] leading-relaxed text-slate-600">
+        Shown at the top of every email this company sends. Upload once — saved on this tenant, no need to re-add it per template.
+      </p>
+      <div className="flex items-center gap-2 rounded-lg border border-white/5 bg-ink p-2">
+        <div className="grid h-11 w-16 shrink-0 place-items-center rounded-md bg-white/90 p-1">
+          {logo ? <img src={logo} alt="header logo" className="max-h-9 max-w-full object-contain" /> : <span className="text-[9px] text-slate-400">None</span>}
+        </div>
+        <div className="flex-1 space-y-1">
+          <button onClick={() => fileRef.current?.click()} disabled={uploading} className="w-full rounded-md bg-brand px-2 py-1.5 text-[11px] font-bold text-white hover:bg-brand-deep disabled:opacity-50">
+            {uploading ? "Uploading…" : "Upload logo"}
+          </button>
+          {logo && (
+            <button onClick={() => saveLogo.mutate("")} className="w-full rounded-md border border-white/10 text-[10px] font-semibold text-slate-400 hover:text-red-400">
+              Remove
+            </button>
+          )}
+        </div>
+      </div>
+      <input aria-label="File upload" ref={fileRef} type="file" accept="image/*" className="hidden" onChange={(e) => e.target.files?.[0] && upload(e.target.files[0])} />
+      <div className="mt-1.5 flex gap-1">
+        <input
+          aria-label="…or paste a logo URL"
+          className={`${inputCls} text-xs`}
+          value={urlDraft}
+          onChange={(e) => setUrlDraft(e.target.value)}
+          placeholder="…or paste a logo URL"
+        />
+        <button
+          onClick={() => { if (urlDraft.trim()) { saveLogo.mutate(urlDraft.trim()); setUrlDraft(""); } }}
+          disabled={!urlDraft.trim() || saveLogo.isPending}
+          className="shrink-0 rounded-lg border border-white/10 bg-ink px-2.5 text-xs font-semibold text-slate-300 hover:text-cyan-glow disabled:opacity-40"
+        >
+          Set
+        </button>
+      </div>
     </div>
   );
 }
