@@ -115,26 +115,34 @@ export async function unregisterPushToken(): Promise<void> {
 
 /**
  * Hook: registers the push token once the user is authenticated and wires up
- * tap handling so a job notification routes straight to that job screen.
+ * tap handling so a job notification routes straight to that job screen (or
+ * a message notification routes to the Messages tab).
  */
 export function usePushNotifications() {
   const router = useRouter();
   const responseListener = useRef<Notifications.Subscription | null>(null);
+
+  const routeFromNotification = (data: Record<string, any> | undefined) => {
+    if (!data) return;
+    const bookingId = data.bookingId;
+    if (bookingId) { router.push(`/job/${bookingId}`); return; }
+    if (data.type === "direct_message" || data.type === "broadcast_message") {
+      router.push("/(rider)/messages");
+    }
+  };
 
   useEffect(() => {
     registerPushToken();
 
     // Cold start: app opened from a notification tap.
     Notifications.getLastNotificationResponseAsync().then((response) => {
-      const bookingId = response?.notification.request.content.data?.bookingId;
-      if (bookingId) router.push(`/job/${bookingId}`);
+      routeFromNotification(response?.notification.request.content.data as any);
     });
 
     // Warm tap: user taps a notification while app is running/backgrounded.
     responseListener.current =
       Notifications.addNotificationResponseReceivedListener((response) => {
-        const bookingId = response.notification.request.content.data?.bookingId;
-        if (bookingId) router.push(`/job/${bookingId}`);
+        routeFromNotification(response.notification.request.content.data as any);
       });
 
     return () => {
@@ -142,4 +150,19 @@ export function usePushNotifications() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+}
+
+/**
+ * Keep the OS app-icon badge in sync with the unread dispatch-message count.
+ * The push payload's `badge` field already sets this when a push is
+ * delivered, but this is a belt-and-suspenders local sync for whenever the
+ * app is foregrounded (polling already refreshes the count there) and to
+ * reliably clear the badge to 0 once the thread has been read.
+ */
+export async function setAppBadgeCount(count: number): Promise<void> {
+  try {
+    await Notifications.setBadgeCountAsync(Math.max(0, count));
+  } catch {
+    /* badges aren't supported on every platform/launcher — ignore */
+  }
 }

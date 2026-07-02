@@ -1,4 +1,5 @@
 import { Tabs } from "expo-router";
+import { useEffect } from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { useQuery } from "@tanstack/react-query";
 import Constants from "expo-constants";
@@ -11,7 +12,7 @@ import {
 import { C } from "../../lib/theme";
 import { getToken } from "../../lib/auth";
 import { useLocationHeartbeat } from "../../lib/use-location-heartbeat";
-import { usePushNotifications } from "../../lib/push";
+import { usePushNotifications, setAppBadgeCount } from "../../lib/push";
 
 const API = ((Constants.expoConfig?.extra?.apiUrl as string) ?? "").replace(/\/$/, "");
 
@@ -36,6 +37,15 @@ export default function RiderLayout() {
     refetchInterval: 8000,
   });
   const badge = (unread.data as any)?.count ?? 0;
+
+  // Mirror the unread count onto the OS app-icon badge while the app is
+  // open/foregrounded. A push notification's own `badge` field already sets
+  // this when the app is backgrounded/closed and a message arrives — this
+  // covers the case where the count changes while polling in the foreground
+  // (e.g. reading on another device) and reliably syncs it back down.
+  useEffect(() => {
+    setAppBadgeCount(badge);
+  }, [badge]);
 
   return (
     <Tabs

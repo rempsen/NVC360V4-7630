@@ -1,10 +1,12 @@
 import { Hono } from "hono";
 import { db } from "../database";
+import { tdb } from "../database/tenant";
 import * as schema from "../database/schema";
 import { eq, and, or, isNull, inArray } from "drizzle-orm";
 import { requireAuth, requireAdmin, tx, tenantId } from "../middleware/auth";
 import { isAdminRole } from "../lib/permissions";
 import { sendSms, trackingUrl } from "../../services/sms";
+import { sendPush } from "../../services/push";
 
 type SessionUser = { id: string; role?: string; name: string };
 
@@ -12,6 +14,21 @@ function roleLabel(role?: string): "client" | "tech" | "dispatch" {
   if (role === "rider") return "tech";
   if (isAdminRole(role)) return "dispatch";
   return "client";
+}
+
+/**
+ * Unread count for a rider's direct dispatcher thread — same query the
+ * `/direct/unread` endpoint uses. Used to set the push notification's
+ * `badge` so the closed/backgrounded app's icon shows the right number
+ * (this is what actually drives the red counter on the home-screen icon;
+ * the app itself has no way to update its own badge while not running).
+ */
+async function unreadDirectCountForRider(companyId: string, riderId: string): Promise<number> {
+  const rows = await tdb(companyId).select(
+    schema.messages,
+    and(eq(schema.messages.riderId, riderId), isNull(schema.messages.bookingId), eq(schema.messages.read, false)),
+  );
+  return rows.filter((m) => m.senderRole === "dispatch").length;
 }
 
 export const messagesRoutes = new Hono()
@@ -237,6 +254,7 @@ export const messagesRoutes = new Hono()
   .post("/dispatch/:techId", requireAdmin, async (c) => {
     const u = c.get("user") as SessionUser;
     const techId = c.req.param("techId");
+    const co = tenantId(c);
     const t = tx(c);
     const rider = await t.selectOne(schema.riders, eq(schema.riders.id, techId));
     if (!rider) return c.json({ message: "Tech not found" }, 404);
@@ -258,6 +276,17 @@ export const messagesRoutes = new Hono()
       title: `Message from dispatch`,
       body,
     });
+
+    // Push to the tech's devices so they get a notification banner even when
+    // the app is backgrounded or fully closed — and set the badge count so
+    // the closed app's icon shows the number of unread dispatch messages
+    // (this is the whole point: they shouldn't have to open the app and
+    // scroll down to discover a new message).
+    const unread = await unreadDirectCountForRider(co, techId);
+    sendPush(rider.userId, `Message from ${u.name || "Dispatch"}`, body, {
+      type: "direct_message",
+      techId,
+    }, unread).catch(() => {});
 
     return c.json({ message: m }, 201);
   })
@@ -330,6 +359,13 @@ export const messagesRoutes = new Hono()
         title: `Broadcast from ${u.name || "Dispatch"}`,
         body,
       });
+      // Same push + badge treatment as a direct message — a broadcast is just
+      // as easy to miss as a 1:1 message if the app isn't open.
+      const unread = await unreadDirectCountForRider(cId, rider.id);
+      sendPush(rider.userId, `Broadcast from ${u.name || "Dispatch"}`, body, {
+        type: "broadcast_message",
+        broadcastId,
+      }, unread).catch(() => {});
       sent++;
     }
 

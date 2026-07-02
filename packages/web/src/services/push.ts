@@ -60,12 +60,17 @@ async function pruneTokens(tokens: string[]) {
 /**
  * Send a push notification to every device a user has registered.
  * No-op (and never throws) when the user has no tokens.
+ *
+ * `badge`, when provided, sets the app-icon unread count on the recipient's
+ * devices (iOS reads this directly off the push payload; Android launchers
+ * that support badges pick it up too). Omit it to leave the badge unchanged.
  */
 export async function sendPush(
   userId: string,
   title: string,
   body: string,
   data?: Record<string, unknown>,
+  badge?: number,
 ): Promise<void> {
   let tokens: string[];
   try {
@@ -84,6 +89,7 @@ export async function sendPush(
     sound: "default",
     priority: "high",
     channelId: "default",
+    ...(badge != null ? { badge } : {}),
   }));
 
   await deliver(messages);

@@ -1,42 +1,38 @@
-# Public Work Order Creation Form (internal employees, no login)
+# Push notifications + app badge for dispatcher -> driver messages
 
-## Goal
-Extend intake forms system: add a "Work Order" form type alongside existing "Lead" type.
-Public, unauthenticated (but PIN-gated) form where internal employees create REAL work
-orders (bookings) with the same dynamic optionality as the admin work-order-modal:
-client search/create, service, priority, optional schedule + technician, dynamic custom
-fields, AND catalog-driven line items (products/labor/assemblies) + ad-hoc line items,
-mirroring buildLineItem/buildUnitLineItem/ChargesEditor.
+## Root cause found
+Job-status events (assigned/enroute/etc, via dispatch.ts fireEvent) already
+call sendPush() correctly — that's why those show up as banners even when the
+app is backgrounded/closed. But the actual chat/messaging routes in
+messages.ts (POST /dispatch/:techId direct message, POST /broadcast) NEVER
+call sendPush() at all — they only insert a `notifications` DB row, which is
+only visible if the user opens the app and looks. That's the whole bug: no
+push = no banner when backgrounded/closed, and no APNs badge count sent
+either (push.ts's PushMessage type has a `badge` field but nothing ever
+populates it).
 
-## Decisions (from user)
-- Access control: shared employee access code/PIN per company (not full login).
-- Client: search existing OR add new inline.
-- Tech + schedule: optional, employee CAN set but not required.
-- Pricing: YES — full dynamic line items (catalog products/services/assemblies + ad-hoc),
-  same power as admin modal, not just flat_fee/price_logic custom fields.
-- Admin UI: extend existing Intake Forms page with a Lead / Work Order type toggle
-  (not a separate nav section).
+## Fix
+1. push.ts: sendPush() accepts an optional `badge` count, forwarded to Expo's
+   push payload (badge is what sets the iOS app-icon number; Android best-effort
+   depending on launcher, but the in-tray count updates regardless).
+2. messages.ts: add unreadDirectCountForRider() helper (mirrors the existing
+   /direct/unread query). Call sendPush() with this badge count from:
+   - POST /dispatch/:techId (dispatcher -> single tech)
+   - POST /broadcast (dispatcher -> many techs)
+3. Mobile: keep the OS badge in sync locally too (belt & suspenders in case a
+   push is delayed/coalesced) — call Notifications.setBadgeCountAsync() from
+   the existing unread-count query in (rider)/_layout.tsx, and reset to 0 when
+   the direct thread is read (messages.tsx).
+4. push tap handling: route to the Messages tab when a message push (no
+   bookingId) is tapped.
 
-## Plan
-1. Schema: intakeForms += formType ('lead'|'work_order' default 'lead'), accessCode
-   (text default ''), allowTechAssign (bool default true). Migrate via raw SQL (Turso).
-2. Backend (public-forms.ts):
-   - GET form endpoint: include formType, allowTechAssign; services already returned.
-   - NEW POST /:companyId/:slug/verify-code {code} -> {ok} rate-limited.
-   - NEW GET /:companyId/:slug/catalog (header X-Access-Code) -> catalog items (tenant).
-   - NEW GET /:companyId/:slug/clients?q= (header X-Access-Code) -> search customers.
-   - NEW GET /:companyId/:slug/riders (header X-Access-Code) -> active riders (if allowTechAssign).
-   - POST submit: branch on formType. work_order path: validate access code, resolve/create
-     client, build booking like admin POST /admin (lineItems, rateModel, templateId seed,
-     priority, staffNotes, requiredSkillClass, riderId optional, scheduledAt optional/default
-     now+1day), recomputeBooking, create invoice, fireEvent("created"), tag fieldData.source.
-3. Admin UI (intake-forms.tsx): Lead/Work Order toggle at top of FormEditor; when Work Order:
-   access code field (generate button), "allow technician & schedule selection" checkbox.
-   Reuse existing field builder for extra custom questions (still useful for work orders too).
-4. Public UI: new component WorkOrderForm rendered from intake-form.tsx when cfg.formType
-   === 'work_order' (same route /f/:companyId/:slug). Flow: access code gate -> client
-   search/create -> service + priority + optional schedule/tech -> catalog line item picker
-   (search + add, qty, ad-hoc custom line) -> custom fields (if any configured) -> submit.
-5. Typecheck, tests, build, then commit/push if repo allows.
+## Scope decision
+Scoped to the direct dispatcher<->tech thread (the "Messages" tab) — this
+matches exactly what the user described and is the only thread with reliable
+per-tech unread tracking already built. Job-thread (per-booking, 3-party)
+messages have a single shared `read` flag with no per-viewer semantics; adding
+per-tech unread tracking there would require a schema change and touches
+customer/dispatch flows too — flagged as a possible follow-up, not done here
+to avoid destabilizing a live production read-tracking behavior.
 
 ## Status: IN PROGRESS
