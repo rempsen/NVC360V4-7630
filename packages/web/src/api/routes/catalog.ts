@@ -1,9 +1,11 @@
 import { Hono } from "hono";
 import * as schema from "../database/schema";
 import { eq } from "drizzle-orm";
-import { requireAdmin, tx } from "../middleware/auth";
+import { db } from "../database";
+import { requireAdmin, tx, tenantId } from "../middleware/auth";
 import { audit } from "../lib/audit";
 import { putObject } from "../lib/storage";
+import { getIndustryPreset } from "../../services/industry-presets";
 import {
   normalizeCatalogItem,
   itemUnitCost,
@@ -60,6 +62,91 @@ export const catalogRoutes = new Hono()
           r.category.toLowerCase().includes(q)
       );
     return c.json({ items: decorate(rows) }, 200);
+  })
+  // ---------------------------------------------------------------------
+  // Shared category LIST (managed, ordered) — the single source of truth
+  // used by BOTH the Form Builder template "Category" dropdown and the
+  // Product Catalog item "Category" field, so admins edit one list and it
+  // applies everywhere. Seeded once from the tenant's industry preset on
+  // first read (a fresh tenant isn't empty); fully editable after that.
+  //
+  // IMPORTANT: this MUST be registered before the generic "/:id" route
+  // below — Hono matches routes in registration order, so GET "/categories"
+  // was previously being swallowed by GET "/:id" (with id="categories"),
+  // silently 404ing since no catalog item has that id. Same reasoning kept
+  // this whole block ahead of "/:id" further down.
+  // ---------------------------------------------------------------------
+  .get("/categories", requireAdmin, async (c) => {
+    const t = tx(c);
+    let rows = await t.select(schema.formCategories);
+    if (rows.length === 0) {
+      const [co] = await db
+        .select({ industry: schema.companies.industry })
+        .from(schema.companies)
+        .where(eq(schema.companies.id, tenantId(c)));
+      const preset = getIndustryPreset(co?.industry);
+      const seed = preset?.categories?.length ? preset.categories : ["General", "Residential", "Commercial", "Service"];
+      await t.insert(
+        schema.formCategories,
+        seed.map((name, i) => ({ name, sortOrder: i })),
+      );
+      rows = await t.select(schema.formCategories);
+    }
+    rows.sort((a, b) => a.sortOrder - b.sortOrder || a.name.localeCompare(b.name));
+    return c.json({ categories: rows }, 200);
+  })
+  .post("/categories", requireAdmin, async (c) => {
+    const t = tx(c);
+    const body = await c.req.json().catch(() => ({}));
+    const name = String(body.name ?? "").trim();
+    if (!name) return c.json({ message: "name required" }, 400);
+    const existing = await t.select(schema.formCategories);
+    if (existing.some((r) => r.name.toLowerCase() === name.toLowerCase()))
+      return c.json({ message: "A category with this name already exists." }, 409);
+    const maxOrder = existing.reduce((m, r) => Math.max(m, r.sortOrder), -1);
+    const [row] = await t.insert(schema.formCategories, { name, sortOrder: maxOrder + 1 });
+    return c.json({ category: row }, 201);
+  })
+  .patch("/categories/:id", requireAdmin, async (c) => {
+    const t = tx(c);
+    const id = c.req.param("id");
+    const body = await c.req.json().catch(() => ({}));
+    const patch: Record<string, unknown> = {};
+    if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim();
+    if (typeof body.sortOrder === "number") patch.sortOrder = body.sortOrder;
+    const before = await t.selectOne(schema.formCategories, eq(schema.formCategories.id, id));
+    const [row] = await t.update(schema.formCategories, patch, eq(schema.formCategories.id, id));
+    // Renaming a category doesn't retroactively rewrite existing catalog items
+    // or templates that reference the OLD name by design (avoids surprising
+    // bulk edits) — but we do it here anyway since "rename" should mean rename,
+    // not "orphan everything that used the old value".
+    if (before && row && patch.name && before.name !== row.name) {
+      await t.update(
+        schema.catalogItems,
+        { category: row.name } as any,
+        eq(schema.catalogItems.category, before.name),
+      );
+      await t.update(
+        schema.taskTemplates,
+        { category: row.name } as any,
+        eq(schema.taskTemplates.category, before.name),
+      );
+    }
+    return c.json({ category: row }, 200);
+  })
+  .delete("/categories/:id", requireAdmin, async (c) => {
+    const t = tx(c);
+    const id = c.req.param("id");
+    const row = await t.selectOne(schema.formCategories, eq(schema.formCategories.id, id));
+    if (!row) return c.json({ message: "Not found" }, 404);
+    const inUseCatalog = (await t.select(schema.catalogItems, eq(schema.catalogItems.category, row.name))).length;
+    const inUseTemplates = (await t.select(schema.taskTemplates, eq(schema.taskTemplates.category, row.name))).length;
+    if (inUseCatalog + inUseTemplates > 0)
+      return c.json({
+        message: `"${row.name}" is used by ${inUseCatalog} catalog item(s) and ${inUseTemplates} template(s). Reassign them to another category before deleting.`,
+      }, 409);
+    await t.delete(schema.formCategories, eq(schema.formCategories.id, id));
+    return c.json({ ok: true }, 200);
   })
   // single item (with resolved math)
   .get("/:id", async (c) => {
@@ -141,7 +228,7 @@ export const catalogRoutes = new Hono()
     await tx(c).update(schema.catalogItems, { image: stored.url }, eq(schema.catalogItems.id, id));
     return c.json({ url: stored.url }, 200);
   })
-  // distinct categories (for filters)
+  // distinct categories actually IN USE on catalog items (for the catalog filter bar)
   .get("/meta/categories", async (c) => {
     const rows = await tx(c).select(schema.catalogItems, eq(schema.catalogItems.active, true));
     const cats = Array.from(new Set(rows.map((r) => r.category))).filter(Boolean).sort();

@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, apiHeaders } from "../../lib/api";
 import { FullLoader } from "../../components/loader";
+import { CategoryManagerButton } from "../../components/category-manager";
 import { money, dismiss } from "../../lib/utils";
 import {
   Plus,
@@ -249,6 +250,14 @@ function CatalogModal({
   const fileRef = useRef<HTMLInputElement>(null);
   const [uploading, setUploading] = useState(false);
 
+  // Shared category list — same source as the Form Builder template category
+  // dropdown, so admins manage categories once and see them everywhere.
+  const categoriesQ = useQuery({
+    queryKey: ["form-categories"],
+    queryFn: async () => (await api.catalog.categories.$get()).json(),
+  });
+  const categoryOptions: string[] = ((categoriesQ.data as any)?.categories ?? []).map((c: any) => c.name);
+
   const lookup = useMemo(() => {
     const map = new Map(allItems.map((i) => [i.id, i]));
     // include in-progress edits so assembly preview reflects current form for self
@@ -397,7 +406,18 @@ function CatalogModal({
                 <input aria-label="optional" value={form.sku ?? ""} onChange={(e) => set("sku", e.target.value)} className={inputCls} placeholder="optional" />
               </Field>
               <Field label="Category">
-                <input aria-label="Category" value={form.category ?? ""} onChange={(e) => set("category", e.target.value)} className={inputCls} />
+                <div className="flex gap-1.5">
+                  <select aria-label="Category" value={form.category ?? ""} onChange={(e) => set("category", e.target.value)} className={inputCls}>
+                    {/* keep an unknown legacy category selectable so editing never loses it */}
+                    {form.category && !categoryOptions.includes(form.category) && (
+                      <option value={form.category}>{form.category}</option>
+                    )}
+                    {categoryOptions.map((c) => (
+                      <option key={c} value={c}>{c}</option>
+                    ))}
+                  </select>
+                  <CategoryManagerButton label="" />
+                </div>
               </Field>
             </div>
             <Field label="Unit">

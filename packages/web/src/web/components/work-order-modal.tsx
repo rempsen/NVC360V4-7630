@@ -22,6 +22,8 @@ import {
   Camera,
   ImageIcon,
   Loader2,
+  List,
+  Calendar,
 } from "lucide-react";
 import { apiHeaders } from "../lib/api";
 import { useWorkerNoun } from "../lib/use-brand";
@@ -52,6 +54,8 @@ export type CfType =
   | "notes"
   | "text"
   | "checkbox"
+  | "select"
+  | "date"
   | "flat_fee"
   | "price_logic"
   | "file"
@@ -65,6 +69,7 @@ export interface CustomField {
   // type-specific config
   placeholder?: string;       // text / notes
   defaultChecked?: boolean;   // checkbox
+  options?: string[];         // select: the dropdown's choices
   amount?: number;            // flat_fee
   // price_logic: multiplier per unit
   logicRate?: number;
@@ -79,6 +84,8 @@ const CF_TYPES: { type: CfType; icon: React.ReactNode; label: string; desc: stri
   { type: "text",         icon: <Type className="h-4 w-4" />,          label: "Text field",       desc: "Single-line text input" },
   { type: "number",       icon: <Hash className="h-4 w-4" />,          label: "Number",           desc: "Numeric entry (qty, measurements, etc.)" },
   { type: "checkbox",     icon: <CheckSquare className="h-4 w-4" />,   label: "Checkbox",         desc: "Yes / No toggle" },
+  { type: "select",       icon: <List className="h-4 w-4" />,          label: "Dropdown",         desc: "Pick one from a list of options" },
+  { type: "date",         icon: <Calendar className="h-4 w-4" />,      label: "Date",             desc: "Date picker" },
   { type: "flat_fee",     icon: <DollarSign className="h-4 w-4" />,    label: "Flat fee",         desc: "Fixed add-on to the job price" },
   { type: "price_logic",  icon: <TrendingUp className="h-4 w-4" />,    label: "Price logic",      desc: "Rate × quantity (per hour, sqft, unit…)" },
   { type: "file",         icon: <Paperclip className="h-4 w-4" />,     label: "File / Photo",     desc: "Technician can attach a file or photo" },
@@ -87,6 +94,34 @@ const CF_TYPES: { type: CfType; icon: React.ReactNode; label: string; desc: stri
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+/**
+ * Convert a Form Builder template's `fields` JSON (text/number/checkbox/
+ * select/photo/signature/date) into this modal's CustomField shape, so
+ * picking a template actually populates real, editable fields here instead
+ * of the template's fields being saved and never used anywhere. Mirrors the
+ * server-side templateFieldsToCustomFields() in api/routes/bookings.ts (kept
+ * in sync manually — small, stable shape, not worth a shared import across
+ * the web/api boundary for this).
+ */
+function templateFieldsToCustomFields(rawFields: string | null | undefined): CustomField[] {
+  let parsed: any[] = [];
+  try { parsed = JSON.parse(rawFields || "[]"); } catch { parsed = []; }
+  if (!Array.isArray(parsed)) return [];
+  const TYPE_MAP: Record<string, CfType> = {
+    text: "text", number: "number", checkbox: "checkbox", select: "select",
+    date: "date", photo: "file", signature: "file",
+  };
+  return parsed
+    .filter((f) => f && f.type && TYPE_MAP[f.type as string])
+    .map((f) => ({
+      id: uid(),
+      type: TYPE_MAP[f.type as string],
+      label: f.label || "",
+      required: !!f.required,
+      ...(f.type === "select" ? { options: Array.isArray(f.options) ? f.options : [] } : {}),
+    }));
 }
 
 // ─── Pill for the type picker ────────────────────────────────────────────────
@@ -227,6 +262,49 @@ function CfCard({
           />
           Default to checked
         </label>
+      )}
+
+      {cf.type === "select" && (
+        <div className="space-y-1.5">
+          <span className="mb-1 block text-xs font-semibold text-slate-400">Dropdown options</span>
+          {(cf.options ?? []).length === 0 && (
+            <p className="text-xs italic text-slate-500">No options yet — add at least one.</p>
+          )}
+          {(cf.options ?? []).map((opt, idx) => (
+            <div key={idx} className="flex items-center gap-1.5">
+              <input
+                aria-label={`Option ${idx + 1}`}
+                value={opt}
+                onChange={(e) => {
+                  const next = [...(cf.options ?? [])];
+                  next[idx] = e.target.value;
+                  upd({ options: next });
+                }}
+                placeholder={`Option ${idx + 1}`}
+                className={`${inputCls} flex-1`}
+              />
+              <button
+                type="button"
+                aria-label="Remove option"
+                onClick={() => upd({ options: (cf.options ?? []).filter((_, j) => j !== idx) })}
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-md text-slate-500 hover:bg-red-500/10 hover:text-red-400"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            onClick={() => upd({ options: [...(cf.options ?? []), ""] })}
+            className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/5 px-2.5 py-1 text-[11px] font-semibold text-slate-300 hover:border-brand/40 hover:text-brand"
+          >
+            <Plus className="h-3 w-3" /> Add option
+          </button>
+        </div>
+      )}
+
+      {cf.type === "date" && (
+        <p className="text-xs text-slate-500">Technician picks a date on the job screen. No extra config needed.</p>
       )}
 
       {cf.type === "flat_fee" && (
@@ -791,8 +869,25 @@ export function WorkOrderModal({
           </select>
         </Field>
 
-        <Field label="Template" hint="Optional checklist preset">
-          <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} className={inputCls}>
+        <Field label="Template" hint="Loads its checklist & custom fields below — edit freely before saving">
+          <select
+            value={templateId}
+            onChange={(e) => {
+              const id = e.target.value;
+              setTemplateId(id);
+              // Only auto-load fields for a BRAND NEW work order, and only if
+              // the office hasn't already built out custom fields by hand —
+              // never clobber existing work. This is what makes template
+              // fields (text/number/checkbox/dropdown/photo/signature/date)
+              // actually show up and be fillable, instead of being saved by
+              // the Form Builder and never used anywhere.
+              if (!editBooking && customFields.length === 0 && id) {
+                const tpl = (templates.data?.templates ?? []).find((t: any) => t.id === id);
+                if (tpl) setCustomFields(templateFieldsToCustomFields(tpl.fields));
+              }
+            }}
+            className={inputCls}
+          >
             <option value="">None</option>
             {(templates.data?.templates ?? []).map((t: any) => (
               <option key={t.id} value={t.id}>{t.name}</option>

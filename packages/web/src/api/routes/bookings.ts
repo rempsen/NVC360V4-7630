@@ -18,6 +18,34 @@ import { isInAnyZone } from "../../shared/zone-utils";
 
 type SessionUser = { id: string; role?: string; email: string; name: string };
 
+/**
+ * Convert a Form Builder template's `fields` (text/number/checkbox/select/
+ * photo/signature/date) into the `_customFields` shape the work-order modal
+ * and mobile job screen already know how to render and fill in. This is what
+ * actually connects templates to real work orders — previously a template's
+ * fields were saved but never read back anywhere once a booking was created.
+ * "photo" and "signature" both map to "file" (the existing attach-a-file
+ * type); there's no dedicated signature capture yet, tracked separately.
+ */
+function templateFieldsToCustomFields(rawFields: string | null | undefined): any[] {
+  let parsed: any[] = [];
+  try { parsed = JSON.parse(rawFields || "[]"); } catch { parsed = []; }
+  if (!Array.isArray(parsed)) return [];
+  const TYPE_MAP: Record<string, string> = {
+    text: "text", number: "number", checkbox: "checkbox", select: "select",
+    date: "date", photo: "file", signature: "file",
+  };
+  return parsed
+    .filter((f) => f && f.type && TYPE_MAP[f.type])
+    .map((f) => ({
+      id: `tpl_${Math.random().toString(36).slice(2, 10)}`,
+      type: TYPE_MAP[f.type],
+      label: f.label || "",
+      required: !!f.required,
+      ...(f.type === "select" ? { options: Array.isArray(f.options) ? f.options : [] } : {}),
+    }));
+}
+
 // status -> notification mapping
 
 
@@ -180,6 +208,34 @@ export const bookingsRoutes = new Hono()
       }
     }
 
+    // Seed field data + checklist from the chosen template. The admin modal
+    // already lets the office add/edit custom fields before saving (sent as
+    // body.fieldData._customFields) — if it did, that's authoritative (it may
+    // include office edits on top of the template's defaults). Otherwise, if
+    // a template is selected, seed both from it so templates actually DO
+    // something on a real work order instead of being write-only.
+    let fieldData = body.fieldData ? JSON.stringify(body.fieldData) : "{}";
+    let checklistState = "[]";
+    if (body.templateId) {
+      const tpl = await t.selectOne(schema.taskTemplates, eq(schema.taskTemplates.id, body.templateId));
+      if (tpl) {
+        const hasOwnFields = Array.isArray(body.fieldData?._customFields) && body.fieldData._customFields.length > 0;
+        if (!hasOwnFields) {
+          const seeded = templateFieldsToCustomFields(tpl.fields);
+          if (seeded.length) fieldData = JSON.stringify({ ...(body.fieldData ?? {}), _customFields: seeded });
+        }
+        try {
+          const checklist = JSON.parse(tpl.checklist || "[]");
+          if (Array.isArray(checklist) && checklist.length) {
+            checklistState = JSON.stringify(checklist.map((item: any) => ({
+              label: typeof item === "string" ? item : item.label,
+              done: false,
+            })));
+          }
+        } catch { /* leave as "[]" */ }
+      }
+    }
+
     const assignedRider = body.riderId || null;
     const [b] = await t.insert(schema.bookings, {
       customerId: body.customerId,
@@ -195,6 +251,8 @@ export const bookingsRoutes = new Hono()
       lng: body.lng ?? -79.3832,
       notes: body.notes ?? "",
       staffNotes: (body as any).staffNotes ?? "",
+      fieldData,
+      checklistState,
       customerPhone: body.phone ?? cu.phone ?? "",
       region: body.region ?? "",
       rateModel: body.rateModel ? JSON.stringify(body.rateModel) : "",
@@ -286,6 +344,13 @@ export const bookingsRoutes = new Hono()
       set.requiredSkillClass = (body as any).requiredSkillClass ?? "";
     if ((body as any).requiredSkills !== undefined)
       set.requiredSkills = (body as any).requiredSkills ?? "";
+    // BUG FIX: this route never accepted fieldData at all, so any custom
+    // field edits made in the work-order modal (e.g. filling in/adjusting the
+    // dropdown/checkbox/etc. fields carried over from a template) were
+    // silently dropped on every save. The modal always sends the full
+    // { _customFields: [...] } shape, so a plain overwrite is correct here —
+    // there's no partial-merge case to worry about.
+    if (body.fieldData !== undefined) set.fieldData = JSON.stringify(body.fieldData);
 
     // handle (re)assignment if the rider changed
     const newRider = body.riderId;

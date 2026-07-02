@@ -517,6 +517,24 @@ export const tags = sqliteTable("tags", {
   companyIdx: index("tags_company_idx").on(t.companyId),
 }));
 
+/**
+ * Shared work-order/form categories. One flat, ordered list per tenant, used
+ * by BOTH the Form Builder (template "Category" dropdown) and the Product
+ * Catalog (item "Category" field) so admins manage the list in exactly one
+ * place and it stays in sync everywhere it's used. Seeded on first read from
+ * the tenant's industry preset (see industry-presets.ts categories[]) so a
+ * fresh tenant isn't empty, but is fully editable afterward.
+ */
+export const formCategories = sqliteTable("form_categories", {
+  id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),
+  companyId: text("company_id").notNull().default("default"),
+  name: text("name").notNull(),
+  sortOrder: integer("sort_order").notNull().default(0),
+  createdAt: now(),
+}, (t) => ({
+  companyIdx: index("form_categories_company_idx").on(t.companyId),
+}));
+
 /** Tag assignment join (entityType: client | tech) */
 export const entityTags = sqliteTable("entity_tags", {
   id: text("id").primaryKey().$defaultFn(() => crypto.randomUUID()),

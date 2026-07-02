@@ -629,6 +629,26 @@ export default function JobDetail() {
                         </View>
                       );
                     }
+                    if (cf.type === "select") {
+                      return (
+                        <View key={cf.id} style={s.fieldRow}>
+                          <Text style={s.fieldKey}>{cf.label}</Text>
+                          <Text style={[s.fieldVal, val ? undefined : { color: C.muted }]}>
+                            {val != null && val !== "" ? String(val) : "Not set"}
+                          </Text>
+                        </View>
+                      );
+                    }
+                    if (cf.type === "date") {
+                      return (
+                        <View key={cf.id} style={s.fieldRow}>
+                          <Text style={s.fieldKey}>{cf.label}</Text>
+                          <Text style={[s.fieldVal, val ? undefined : { color: C.muted }]}>
+                            {val ? new Date(val).toLocaleDateString() : "Not set"}
+                          </Text>
+                        </View>
+                      );
+                    }
                     if (cf.type === "flat_fee") {
                       if (cf.amount == null) return null;
                       return (

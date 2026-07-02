@@ -4,9 +4,9 @@ import { api } from "../../lib/api";
 import { FullLoader } from "../../components/loader";
 import { PageWrap } from "../../components/brand";
 import { PageHead } from "./shell";
-import { Field, inputCls, BtnPrimary } from "../../components/modal";
+import { Field, inputCls, BtnPrimary, BtnGhost, ConfirmModal } from "../../components/modal";
 import { AddressAutocomplete } from "../../components/address-autocomplete";
-import { Save, Building2, Check, Calendar, Copy, RefreshCw, ExternalLink, MapPin, Sparkles, Plug, KeyRound, ScrollText, Lock, Eye, EyeOff } from "lucide-react";
+import { Save, Building2, Check, Calendar, Copy, RefreshCw, ExternalLink, MapPin, Sparkles, Plug, KeyRound, ScrollText, Lock, Eye, EyeOff, Tag, Plus, Trash2, Pencil, X } from "lucide-react";
 import { useWorkerNoun } from "../../lib/use-brand";
 import { cn } from "../../lib/utils";
 import AutomationPage from "./automation";
@@ -190,6 +190,9 @@ function CompanySettingsTab() {
           </div>
         </div>
 
+          {/* Categories — shared by Form Builder templates and the Product Catalog */}
+          <CategoriesCard />
+
           {/* Geofencing */}
           <div className="nvc-card space-y-4 p-5">
             <h3 className="flex items-center gap-2 font-bold text-white">
@@ -257,6 +260,138 @@ function CompanySettingsTab() {
 
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Categories — one shared, ordered list used by BOTH the Form Builder
+ * template "Category" dropdown and the Product Catalog item "Category"
+ * field. Managing them here means they're set once and stay in sync
+ * everywhere they're used, instead of being edited ad hoc in two places.
+ */
+function CategoriesCard() {
+  const qc = useQueryClient();
+  const list = useQuery({
+    queryKey: ["form-categories"],
+    queryFn: async () => (await api.catalog.categories.$get()).json(),
+  });
+  const [newName, setNewName] = useState("");
+  const [error, setError] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [delRow, setDelRow] = useState<{ id: string; name: string } | null>(null);
+  const [delError, setDelError] = useState("");
+
+  const invalidateEverywhere = () => {
+    qc.invalidateQueries({ queryKey: ["form-categories"] });
+    qc.invalidateQueries({ queryKey: ["catalog"] });
+    qc.invalidateQueries({ queryKey: ["catalog-categories"] });
+    qc.invalidateQueries({ queryKey: ["templates"] });
+  };
+
+  const create = useMutation({
+    mutationFn: async (name: string) => {
+      const res = await api.catalog.categories.$post({ json: { name } });
+      const j = await res.json();
+      if (!res.ok) throw new Error((j as any).message || "Failed to add category");
+      return j;
+    },
+    onSuccess: () => { setNewName(""); setError(""); invalidateEverywhere(); },
+    onError: (e: any) => setError(e.message || "Failed to add category"),
+  });
+  const rename = useMutation({
+    mutationFn: async ({ id, name }: { id: string; name: string }) =>
+      (await api.catalog.categories[":id"].$patch({ param: { id }, json: { name } })).json(),
+    onSuccess: () => { setEditingId(null); invalidateEverywhere(); },
+  });
+  const remove = useMutation({
+    mutationFn: async (id: string) => {
+      const res = await api.catalog.categories[":id"].$delete({ param: { id } });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((j as any).message || "Failed to delete category");
+      return j;
+    },
+    onSuccess: () => { setDelRow(null); setDelError(""); invalidateEverywhere(); },
+    onError: (e: any) => setDelError(e.message || "Failed to delete category"),
+  });
+
+  const categories: { id: string; name: string }[] = (list.data as any)?.categories ?? [];
+
+  return (
+    <div className="nvc-card space-y-4 p-5">
+      <div>
+        <h3 className="flex items-center gap-2 font-bold text-white">
+          <Tag className="h-4 w-4 text-brand" /> Categories
+        </h3>
+        <p className="mt-1 text-xs text-white/50">
+          Shared by Form Builder templates and the Product Catalog — add, rename, or remove them once here.
+        </p>
+      </div>
+
+      <div className="flex gap-2">
+        <input
+          aria-label="New category name"
+          className={inputCls}
+          value={newName}
+          onChange={(e) => { setNewName(e.target.value); setError(""); }}
+          placeholder="e.g. Seasonal Maintenance"
+          onKeyDown={(e) => { if (e.key === "Enter" && newName.trim()) create.mutate(newName.trim()); }}
+        />
+        <button
+          type="button"
+          disabled={!newName.trim() || create.isPending}
+          onClick={() => create.mutate(newName.trim())}
+          className="flex shrink-0 items-center gap-1.5 rounded-lg bg-brand px-3 py-2 text-xs font-semibold text-white hover:bg-brand-deep disabled:opacity-50"
+        >
+          <Plus className="h-3.5 w-3.5" /> Add
+        </button>
+      </div>
+      {error && <p className="text-xs text-red-400">{error}</p>}
+
+      {list.isLoading ? (
+        <p className="py-4 text-center text-xs text-slate-500">Loading…</p>
+      ) : categories.length === 0 ? (
+        <p className="py-4 text-center text-xs text-slate-600">No categories yet.</p>
+      ) : (
+        <div className="space-y-1.5">
+          {categories.map((cat) => (
+            <div key={cat.id} className="flex items-center gap-2 rounded-lg border border-white/10 bg-ink-3/50 px-2.5 py-2">
+              {editingId === cat.id ? (
+                <>
+                  <input
+                    aria-label="Rename category"
+                    autoFocus
+                    className="min-w-0 flex-1 rounded-md border border-brand/40 bg-ink px-2 py-1 text-sm text-white outline-none"
+                    value={editValue}
+                    onChange={(e) => setEditValue(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && editValue.trim()) rename.mutate({ id: cat.id, name: editValue.trim() }); if (e.key === "Escape") setEditingId(null); }}
+                  />
+                  <button type="button" onClick={() => editValue.trim() && rename.mutate({ id: cat.id, name: editValue.trim() })} className="shrink-0 rounded-md p-1 text-emerald-400 hover:bg-white/5"><Check className="h-4 w-4" /></button>
+                  <button type="button" onClick={() => setEditingId(null)} className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-white/5"><X className="h-4 w-4" /></button>
+                </>
+              ) : (
+                <>
+                  <span className="min-w-0 flex-1 truncate text-sm text-white">{cat.name}</span>
+                  <button type="button" onClick={() => { setEditingId(cat.id); setEditValue(cat.name); }} className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-white"><Pencil className="h-3.5 w-3.5" /></button>
+                  <button type="button" onClick={() => { setDelRow(cat); setDelError(""); }} className="shrink-0 rounded-md p-1 text-slate-500 hover:bg-red-500/10 hover:text-red-400"><Trash2 className="h-3.5 w-3.5" /></button>
+                </>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <ConfirmModal
+        open={!!delRow}
+        onClose={() => setDelRow(null)}
+        onConfirm={() => delRow && remove.mutate(delRow.id)}
+        title="Delete category?"
+        message={delError || `"${delRow?.name}" will be removed from the shared list. This is blocked if any catalog item or template still uses it.`}
+        confirmLabel="Delete"
+        pending={remove.isPending}
+        danger
+      />
     </div>
   );
 }

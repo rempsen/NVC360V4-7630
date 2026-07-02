@@ -1,70 +1,46 @@
-# NVC360 UI Polish Task
+# Form Builder audit + fix
 
-## Audit Findings
+## Scope
+1. Shared category list (Settings + Catalog), editable, seeded from industry preset
+2. builder.tsx: checkbox/dropdown option editing (add/remove option rows like intake-forms.tsx already does)
+3. Wire template `fields` end-to-end: admin work-order-modal fill-in + mobile job screen fill-in + persistence
 
-### MARKETING SITE (localhost:4200 / landing page)
-**Issues:**
-1. Hero section spacing is uneven — too much empty space below CTAs before stat bar
-2. Feature cards (Platform section): uniform rounded-2xl + thin border = generic AI look. Need depth layering
-3. Section labels ("PLATFORM", "INTEGRATIONS") are just teal text — could use subtle pill badges
-4. Stats row ("20%", "800+", "1B") lacks visual weight — just numbers on dark bg, no card context
-5. Integration logos in cards are too uniform — boring grid with no visual rhythm
-6. Pricing cards: center card highlighted but not enough — barely distinguishable
-7. Hero typography: "love you." line in cyan is too big at 60px with no letter-spacing tightening
-8. No scroll animations / entrance transitions — page feels static
-9. Nav: no active state differentiation
+## Plan
+- [ ] DB: new `formCategories` table (companyId, name, sortOrder)
+- [ ] API: /api/catalog/categories GET/POST/DELETE (+PATCH rename)
+- [ ] builder.tsx: category select -> use categories API, inline "manage categories" link/modal
+- [ ] catalog.tsx: category field -> dropdown sourced from same API + manage inline
+- [ ] builder.tsx: Field type add `options?: string[]`; checkbox + select get options editor (add/remove rows)
+- [ ] bookings.ts enrich(): include resolved templateFields (from linked template) in booking payload
+- [ ] New route PATCH /api/bookings/:id/template-fields { values } to save fieldData._templateFields
+- [ ] work-order-modal.tsx: render template fields section, collect answers, include in create/patch payload
+- [ ] mobile job/[id].tsx: render + fill template fields, save via new endpoint
+- [ ] typecheck + tests + build + verify in browser
+- [ ] commit + push
 
-### SIGN-IN PAGE
-**Issues:**
-1. Left panel is solid dark gradient — could use a subtle grid/pattern texture
-2. Input fields have large border-radius (pill shape) — inconsistent with the dashboard cards which are more rectangular
-3. Sign In button full cyan — works but could use gradient direction for depth
-4. "Welcome back" heading is boxy — needs letter-spacing refinement
+## Progress
+- [x] DB: form_categories table created (raw SQL, Turso)
+- [x] API: /api/catalog/categories GET/POST/PATCH/DELETE (seed from industry preset, block delete if in use, rename propagates)
+- [x] category-manager.tsx shared component
+- [x] builder.tsx: category select uses shared list + Manage button
+- [x] builder.tsx: FieldRow with options add/remove for select+checkbox
+- [x] catalog.tsx: category field -> dropdown + Manage button
+- [x] settings.tsx: CategoriesCard (inline add/rename/delete)
 
-### DASHBOARD (Admin)
-**Issues:**
-1. Sidebar nav: ALL items look same weight — no active state visual pop beyond bg color. Active item needs left accent bar
-2. KPI cards: icon + large number layout is ok but numbers have no color differentiation — all same treatment
-3. KPI cards: dollar icon size too large relative to the number — awkward proportion
-4. "OPERATIONS", "CATALOG & FORMS", "PEOPLE" section labels are tiny uppercase tracking — barely readable
-5. Recent work orders list: dense, no row separators, status badges are ok but address text wraps awkwardly
-6. Fleet status panel: status dot labels ("En Route", "Available") look like random tag soup
-7. Stat cards have generic purple/teal/green icons inside squares — no depth or brand personality
-8. Chat button (bottom-right cyan circle) clashes slightly — needs subtle shadow
-9. Overall: padding inconsistencies across panels, some 20px some 32px
-10. Work order rows: amount is right-aligned but service type below it is a very small subdued text — loses info hierarchy
+## Remaining (part 3 — wire fields into real work orders)
+- [ ] bookings API: seed checklistState from template.checklist on create
+- [ ] work-order-modal.tsx: render template fields, collect values, save
+- [ ] mobile job/[id].tsx: render + fill remaining template fields
+- [ ] typecheck + tests + build + visual verify + commit + push
 
-## Priority Changes (ordered by impact)
+## Part 3 progress
+- [x] Found + fixed REAL pre-existing bug: /api/bookings/admin (create) never accepted fieldData at all -> custom fields silently dropped on every new work order
+- [x] Found + fixed REAL pre-existing bug: PATCH /api/bookings/:id never accepted fieldData either -> edits to custom fields were silently dropped on save
+- [x] Added templateFieldsToCustomFields() helper in bookings.ts: converts template.fields (text/number/checkbox/select/photo/signature/date) into the existing _customFields shape (photo+signature -> file)
+- [x] Admin create route now seeds fieldData._customFields + checklistState from the selected template (if office hasn't already customized fields)
+- [x] Added "select" and "date" CfType to work-order-modal.tsx (CF_TYPES, CfCard config UI incl. options add/remove for select)
+- [ ] NEXT: work-order-modal.tsx frontend — on template selection (new WO only), load template fields into customFields editor so office sees/can edit them before saving (currently only happens server-side on submit, invisible until reload)
+- [ ] Mobile job/[id].tsx: add "select" and "date" rendering to the _customFields renderer (currently only handles instructions/checkbox/flat_fee/price_logic/notes/text/number) + confirm checklist renders (it already does via separate `checklist` array)
+- [ ] typecheck + tests + build + visual verify + commit + push
 
-### P0 — Dashboard (most used screen)
-1. **Sidebar active state**: Add left 2px cyan accent bar + slightly brighter text + bg to active item
-2. **KPI cards**: Add subtle top border color per-card (different accent), larger number weight, icon right-aligned
-3. **Recent work orders**: Better row padding, stronger status badge contrast, amount as primary not secondary
-4. **Fleet status**: Status indicator cleanup — pill badges with dot+label, better grouping
-
-### P1 — Marketing/Landing
-1. **Feature cards**: Add hover lift + subtle inner-glow border on hover  
-2. **Pricing cards**: Center card gets glow border + slight scale
-3. **Section labels**: Pill badge style (bg/10 border accent)
-4. **Stats bar**: Card treatment with subtle borders
-
-### P2 — Sign-in
-1. Left panel texture / grid overlay
-2. Input border-radius standardization (rounded-lg not rounded-full)
-
-## Files to touch
-- packages/web/src/web/pages/admin/dashboard.tsx — KPI cards, work orders list, fleet status
-- packages/web/src/web/components/sidebar.tsx (or layout) — sidebar active state
-- packages/web/src/web/pages/landing/ or index.tsx — feature cards, pricing, stats
-- packages/web/src/web/pages/sign-in.tsx — inputs, button
-- packages/web/src/index.css or tailwind config — global type scale
-
-## Status
-- [ ] Audit done
-- [ ] Sidebar polish
-- [ ] Dashboard KPI cards
-- [ ] Work orders rows
-- [ ] Feature cards hover
-- [ ] Pricing card glow
-- [ ] Sign-in inputs
-- [ ] Build + verify
+## Status: in progress — part 3 in progress
