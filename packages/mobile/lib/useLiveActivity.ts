@@ -59,7 +59,7 @@ function buildState(job: LiveActivityJobState) {
   };
 }
 
-function buildConfig(status: string) {
+function buildConfig(status: string, jobId: string) {
   const isComplete = status === "completed";
   return {
     backgroundColor: isComplete ? "064e3b" : "070b12",   // brand ink navy; deep green on complete
@@ -73,7 +73,10 @@ function buildConfig(status: string) {
     imageAlign: "center" as const,
     imageSize: { width: 46, height: 46 },
     contentFit: "contain" as const,
-    deepLinkUrl: `/job/${isComplete ? "" : ""}`,
+    // Bug fix: this used to always resolve to "/job/" with no id — tapping the
+    // activity/Dynamic Island never opened the right job. Now deep-links straight
+    // into the active job screen.
+    deepLinkUrl: `/job/${jobId}`,
   };
 }
 
@@ -131,7 +134,7 @@ export function useLiveActivity(job: LiveActivityJobState | null | undefined) {
     // Start activity when job becomes active and no activity is running
     if (isActive && !activityIdRef.current) {
       try {
-        const id = LiveActivity.startActivity?.(buildState(job), buildConfig(status));
+        const id = LiveActivity.startActivity?.(buildState(job), buildConfig(status, job.jobId));
         if (id) {
           activityIdRef.current = id;
           prevStatusRef.current = status;
