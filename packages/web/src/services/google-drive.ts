@@ -38,19 +38,39 @@ async function freshAccessToken(row: IntegrationRow): Promise<string> {
     if (row.accessToken) return row.accessToken;
     throw new Error("drive_not_connected");
   }
-  const t = await refreshTokens("google_drive", row.refreshToken);
-  await db
-    .update(schema.integrations)
-    .set({
-      accessToken: t.accessToken,
-      refreshToken: t.refreshToken || row.refreshToken,
-      expiresAt: t.expiresAt ? new Date(t.expiresAt) : row.expiresAt,
-      scope: t.scope || row.scope,
-      lastSyncAt: new Date(),
-    })
-    .where(eq(schema.integrations.id, row.id));
-  return t.accessToken;
+  try {
+    const t = await refreshTokens("google_drive", row.refreshToken);
+    await db
+      .update(schema.integrations)
+      .set({
+        accessToken: t.accessToken,
+        refreshToken: t.refreshToken || row.refreshToken,
+        expiresAt: t.expiresAt ? new Date(t.expiresAt) : row.expiresAt,
+        scope: t.scope || row.scope,
+        lastSyncAt: new Date(),
+      })
+      .where(eq(schema.integrations.id, row.id));
+    return t.accessToken;
+  } catch (e: any) {
+    // "invalid_grant" means Google has permanently revoked this refresh token —
+    // most commonly because the OAuth app is still in Google's unverified
+    // "Testing" publishing status, where Google auto-expires refresh tokens
+    // after just 7 days regardless of use. No amount of retrying fixes this;
+    // the user must reconnect (re-consent) to get a fresh token. Mark the
+    // integration accordingly so the UI can prompt for reconnect instead of
+    // silently failing on every export attempt.
+    const msg = String(e?.message || "");
+    if (msg.includes("invalid_grant")) {
+      await db
+        .update(schema.integrations)
+        .set({ status: "error" })
+        .where(eq(schema.integrations.id, row.id));
+      throw new Error("drive_reauth_required");
+    }
+    throw e;
+  }
 }
+
 
 /** Escape single quotes for use inside a Drive `q=` query string. */
 function escQ(s: string): string {

@@ -141,6 +141,11 @@ export default function IntegrationsPage() {
                           className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-white/10 bg-white/5 py-2 text-xs font-semibold text-slate-400 hover:bg-white/10">
                           <Clock className="h-3.5 w-3.5" /> Coming soon
                         </button>
+                      ) : err ? (
+                        <button onClick={() => connect(it)} disabled={connecting === it.id}
+                          className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-red-500/15 py-2 text-xs font-semibold text-red-300 hover:bg-red-500/25 disabled:opacity-60">
+                          <RefreshCw className="h-3.5 w-3.5" /> {connecting === it.id ? "Reconnecting…" : "Reconnect"}
+                        </button>
                       ) : (
                         <button onClick={() => connect(it)} disabled={connecting === it.id}
                           className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand py-2 text-xs font-semibold text-white hover:bg-brand-deep disabled:opacity-60">
@@ -158,7 +163,14 @@ export default function IntegrationsPage() {
 
       <ComingSoonModal item={comingSoon} onClose={() => setComingSoon(null)} isOwner={isOwner} onSetup={() => { setComingSoon(null); setShowSetup(true); }} />
       {isOwner && <SetupModal open={showSetup} onClose={() => setShowSetup(false)} />}
-      <DriveExportModal open={driveExport} onClose={() => { setDriveExport(false); qc.invalidateQueries({ queryKey: ["integrations"] }); }} />
+      <DriveExportModal
+        open={driveExport}
+        onClose={() => { setDriveExport(false); qc.invalidateQueries({ queryKey: ["integrations"] }); }}
+        onReconnect={() => {
+          const driveItem = items.find((i) => i.provider === "google_drive");
+          if (driveItem) connect(driveItem);
+        }}
+      />
     </PageWrap>
   );
 }
@@ -170,12 +182,13 @@ const DRIVE_DATASETS = [
   { id: "technicians", label: "Technicians" },
   { id: "invoices", label: "Invoices" },
 ];
-function DriveExportModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function DriveExportModal({ open, onClose, onReconnect }: { open: boolean; onClose: () => void; onReconnect?: () => void }) {
   const { nounPlural } = useWorkerNoun();
   const [dataset, setDataset] = useState("work-orders");
   const [format, setFormat] = useState<"csv" | "xlsx">("xlsx");
   const [result, setResult] = useState<any>(null);
   const [error, setError] = useState("");
+  const [reauthRequired, setReauthRequired] = useState(false);
   const [showFolder, setShowFolder] = useState(false);
 
   // Folder settings (root name + subfolder toggles)
@@ -223,13 +236,25 @@ function DriveExportModal({ open, onClose }: { open: boolean; onClose: () => voi
   const run = useMutation({
     mutationFn: async () => {
       setError("");
+      setReauthRequired(false);
       const res = await fetch("/api/integrations/drive/export", {
         method: "POST",
         headers: { ...apiHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ dataset, format }),
       });
-      const j = await res.json();
-      if (!res.ok) throw new Error(j.message || "Export failed");
+      let j: any;
+      try {
+        j = await res.json();
+      } catch {
+        // Response wasn't JSON at all (e.g. an upstream proxy/CDN error page
+        // slipped through) — give a clear message instead of surfacing the
+        // raw "Unexpected token '<'..." parse error to the user.
+        throw new Error("Something went wrong reaching the server. Please try again in a moment.");
+      }
+      if (!res.ok) {
+        if (j.reauthRequired) setReauthRequired(true);
+        throw new Error(j.message || "Export failed");
+      }
       return j;
     },
     onSuccess: (j) => setResult(j),
@@ -239,6 +264,7 @@ function DriveExportModal({ open, onClose }: { open: boolean; onClose: () => voi
   function close() {
     setResult(null);
     setError("");
+    setReauthRequired(false);
     setShowFolder(false);
     onClose();
   }
@@ -329,7 +355,19 @@ function DriveExportModal({ open, onClose }: { open: boolean; onClose: () => voi
             )}
           </div>
 
-          {error && <p className="rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">{error}</p>}
+          {error && (
+            <div className="space-y-2 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-400">
+              <p>{error}</p>
+              {reauthRequired && onReconnect && (
+                <button
+                  onClick={() => { close(); onReconnect(); }}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-red-500/20 px-3 py-1.5 text-xs font-semibold text-red-200 hover:bg-red-500/30"
+                >
+                  <RefreshCw className="h-3.5 w-3.5" /> Reconnect Google Drive
+                </button>
+              )}
+            </div>
+          )}
           <button onClick={() => run.mutate()} disabled={run.isPending}
             className="flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand py-2.5 text-sm font-semibold text-white hover:bg-brand-deep disabled:opacity-60">
             <UploadCloud className={`h-4 w-4 ${run.isPending ? "animate-pulse" : ""}`} /> {run.isPending ? "Backing up…" : "Back up now"}

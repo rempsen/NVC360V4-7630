@@ -249,7 +249,16 @@ export async function refreshTokens(provider: ProviderId, refreshToken: string):
   }
   const r = await fetch(cfg.tokenUrl, { method: "POST", headers, body });
   const raw = await r.json();
-  if (!r.ok) throw new Error(raw.error_description || raw.error || "refresh_failed");
+  if (!r.ok) {
+    // Prefer the OAuth error CODE (e.g. "invalid_grant") over error_description
+    // — providers like Google sometimes send a useless generic description
+    // ("Bad Request") alongside the actually-meaningful code. Callers (see
+    // google-drive.ts freshAccessToken) pattern-match on the message to detect
+    // "needs reconnect" vs other failures, so the code must always be present.
+    const code = raw.error || "refresh_failed";
+    const desc = raw.error_description && raw.error_description !== "Bad Request" ? `: ${raw.error_description}` : "";
+    throw new Error(`${code}${desc}`);
+  }
   const t = normalizeTokens(raw);
   if (!t.refreshToken) t.refreshToken = refreshToken; // some providers omit on refresh
   return t;

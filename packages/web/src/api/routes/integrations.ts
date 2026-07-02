@@ -271,9 +271,16 @@ export const integrationsRoutes = new Hono()
       );
     } catch (e: any) {
       const msg = String(e?.message || "drive_upload_failed");
-      if (msg === "drive_not_connected")
-        return c.json({ message: "Google Drive connection expired — reconnect it." }, 412);
-      return c.json({ message: msg }, 502);
+      // These are USER-actionable connection problems, not server failures —
+      // return 4xx (never 5xx/502) for two reasons: (1) it's the correct
+      // semantic — nothing is wrong with our server, the tenant's Drive
+      // connection needs attention; (2) production sits behind Cloudflare,
+      // which intercepts 502/504 upstream errors and replaces the body with
+      // its own HTML error page, discarding our JSON entirely — that's what
+      // produced the "Unexpected token '<', <!DOCTYPE..." error in the UI.
+      if (msg === "drive_not_connected" || msg === "drive_reauth_required")
+        return c.json({ message: "Google Drive access expired — click Reconnect and re-authorize to keep backups working.", reauthRequired: true }, 409);
+      return c.json({ message: msg }, 422);
     }
   })
 
@@ -353,6 +360,8 @@ export const integrationsRoutes = new Hono()
       return c.json({ integration: r, ok: true }, 200);
     } catch (e: any) {
       await t9.update(schema.integrations, { status: "error" }, eq(schema.integrations.id, row.id));
-      return c.json({ message: e?.message || "sync_failed" }, 502);
+      // 4xx, not 502 — see the drive/export handler above for why: Cloudflare
+      // eats 502/504 bodies and replaces them with an HTML error page.
+      return c.json({ message: e?.message || "sync_failed" }, 422);
     }
   });
