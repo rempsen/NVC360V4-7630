@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { api } from "../../lib/api";
 import { TechAvatar } from "../../components/tech-avatar";
@@ -508,6 +508,17 @@ function ChatDrawer({ tech, onClose }: { tech: any; onClose: () => void }) {
       thread.refetch();
     },
   });
+
+  // Explicitly ack read ONCE when this drawer opens for a tech — not on every
+  // poll. The GET no longer marks-as-read as a side effect (it used to, which
+  // meant this drawer's own 4s poll could silently clear unread state before
+  // a dispatcher ever actually looked at a new message).
+  useEffect(() => {
+    if (!tech?.id) return;
+    api.fleet[":techId"]["thread"]["mark-read"].$post({ param: { techId: tech.id } }).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tech?.id]);
+
   if (!tech) return null;
   const direct = (thread.data as any)?.direct ?? [];
   const job = (thread.data as any)?.job ?? null;

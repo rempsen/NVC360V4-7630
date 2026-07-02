@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -12,7 +12,7 @@ import {
   RefreshControl,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import Constants from "expo-constants";
 import {
@@ -25,6 +25,7 @@ import {
 import { getToken } from "../../lib/auth";
 import { C } from "../../lib/theme";
 import { FullLoader } from "../../components/ui";
+import { setAppBadgeCount } from "../../lib/push";
 
 const API = ((Constants.expoConfig?.extra?.apiUrl as string) ?? "").replace(/\/$/, "");
 
@@ -88,6 +89,28 @@ export default function Messages() {
       qc.invalidateQueries({ queryKey: ["dispatch-thread"] });
     },
   });
+
+  // Explicitly ack read ONCE whenever this screen gains focus — not from the
+  // 5s poll. The GET no longer marks-as-read as a side effect (it used to,
+  // which meant the app icon's unread badge and the poll were racing each
+  // other, and reading a message on a backgrounded/foregrounded app could
+  // leave the badge stuck). Clearing the OS badge right here, right after a
+  // successful ack, makes it deterministic instead of waiting on the next
+  // poll cycle in the tab layout to notice the count dropped.
+  useFocusEffect(
+    useCallback(() => {
+      fetch(`${API}/api/messages/direct/mark-read`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${getToken()}` },
+      })
+        .then(() => {
+          qc.invalidateQueries({ queryKey: ["dispatch-unread"] });
+          setAppBadgeCount(0);
+        })
+        .catch(() => {});
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []),
+  );
 
   const direct = thread.data?.direct ?? [];
   const offers = (jobs.data ?? []).filter(

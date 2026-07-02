@@ -48,14 +48,10 @@ export const messagesRoutes = new Hono()
     );
     direct.sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
 
-    // Mark all unread direct messages as read
-    if (direct.some((m) => !m.read)) {
-      await t.update(
-        schema.messages,
-        { read: true },
-        and(eq(schema.messages.riderId, rider.id), isNull(schema.messages.bookingId)),
-      );
-    }
+    // NOTE: read state is NOT touched here anymore — this endpoint is polled
+    // continuously (every 5s) by the Messages screen even while backgrounded,
+    // so marking-as-read as a side effect of fetching silently cleared unread
+    // state before a human ever actually looked. See POST /direct/mark-read.
 
     // current active job thread
     const activeAll = await t.select(
@@ -82,6 +78,23 @@ export const messagesRoutes = new Hono()
     }
 
     return c.json({ direct, job }, 200);
+  })
+
+  // POST /api/messages/direct/mark-read — rider explicitly acks having opened
+  // the dispatch thread. Called once when the Messages screen gains focus,
+  // never from a poll, so "read" actually means a human looked at it.
+  .post("/direct/mark-read", requireAuth, async (c) => {
+    const u = c.get("user") as SessionUser;
+    if (u.role !== "rider") return c.json({ message: "Forbidden" }, 403);
+    const t = tx(c);
+    const rider = await t.selectOne(schema.riders, eq(schema.riders.userId, u.id));
+    if (!rider) return c.json({ message: "Rider not found" }, 404);
+    await t.update(
+      schema.messages,
+      { read: true },
+      and(eq(schema.messages.riderId, rider.id), isNull(schema.messages.bookingId)),
+    );
+    return c.json({ ok: true }, 200);
   })
 
   // POST /api/messages/direct — rider posts to their direct dispatch thread
@@ -219,17 +232,10 @@ export const messagesRoutes = new Hono()
     );
     msgs.sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
 
-    if (msgs.some((m) => !m.read && m.senderRole === "tech")) {
-      await t.update(
-        schema.messages,
-        { read: true },
-        and(
-          eq(schema.messages.riderId, techId),
-          isNull(schema.messages.bookingId),
-          eq(schema.messages.senderRole, "tech"),
-        ),
-      );
-    }
+    // NOTE: read state is NOT touched here anymore — this endpoint is polled
+    // continuously (every 4s) by the chat view even while backgrounded, so
+    // marking-as-read as a side effect of fetching silently cleared unread
+    // state before a dispatcher ever actually looked. See mark-read below.
 
     const [u] = await db
       .select()
@@ -248,6 +254,23 @@ export const messagesRoutes = new Hono()
       },
       200,
     );
+  })
+
+  // POST /api/messages/dispatch/:techId/mark-read — dispatcher explicitly acks
+  // having opened this tech's thread. Called once on open, never from a poll.
+  .post("/dispatch/:techId/mark-read", requireAdmin, async (c) => {
+    const techId = c.req.param("techId");
+    const t = tx(c);
+    await t.update(
+      schema.messages,
+      { read: true },
+      and(
+        eq(schema.messages.riderId, techId),
+        isNull(schema.messages.bookingId),
+        eq(schema.messages.senderRole, "tech"),
+      ),
+    );
+    return c.json({ ok: true }, 200);
   })
 
   // POST /api/messages/dispatch/:techId — dispatcher messages a tech

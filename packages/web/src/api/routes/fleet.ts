@@ -107,14 +107,11 @@ export const fleetRoutes = new Hono()
     );
     direct.sort((a, b) => Number(a.createdAt) - Number(b.createdAt));
 
-    // mark unread tech messages as read (dispatcher is viewing)
-    if (direct.some((m) => !m.read && m.senderRole === "tech")) {
-      await t.update(
-        schema.messages,
-        { read: true },
-        and(eq(schema.messages.riderId, techId), isNull(schema.messages.bookingId)),
-      );
-    }
+    // NOTE: read state is NOT touched here anymore — this endpoint is polled
+    // continuously (every 4s) by the fleet chat drawer even while
+    // backgrounded, so marking-as-read as a side effect of fetching silently
+    // cleared unread state before a dispatcher ever actually looked. See the
+    // explicit POST /:techId/thread/mark-read below.
 
     // current active job + its thread
     const activeAll = await t.select(
@@ -141,6 +138,18 @@ export const fleetRoutes = new Hono()
       };
     }
     return c.json({ direct, job }, 200);
+  })
+  // explicit ack: dispatcher opened this tech's chat drawer. Called once on
+  // open, never from the 4s poll, so "read" actually means a human looked.
+  .post("/:techId/thread/mark-read", requireAdmin, async (c) => {
+    const techId = c.req.param("techId");
+    const t = tx(c);
+    await t.update(
+      schema.messages,
+      { read: true },
+      and(eq(schema.messages.riderId, techId), isNull(schema.messages.bookingId)),
+    );
+    return c.json({ ok: true }, 200);
   })
   // unread count: how many unread tech→dispatch messages in direct thread
   .get("/:techId/unread", requireAdmin, async (c) => {

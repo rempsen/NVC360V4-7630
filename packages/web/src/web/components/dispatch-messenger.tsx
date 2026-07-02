@@ -642,11 +642,14 @@ function ChatView({
     },
   });
 
-  // mark-as-read happens on the GET; refresh the badge list when opening
+  // Explicitly ack read ONCE when this thread is opened (tech.techId changes)
+  // — not on every poll. The GET no longer marks-as-read as a side effect
+  // (it used to, which meant a background poll for an already-open thread
+  // could silently clear unread state before a dispatcher ever looked).
   useEffect(() => {
-    onSent();
+    jpost(`/api/messages/dispatch/${tech.techId}/mark-read`, {}).finally(onSent);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tech.techId, threadQ.data]);
+  }, [tech.techId]);
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
