@@ -45,6 +45,13 @@ export default function AdminZones() {
   });
   const [delZone, setDelZone] = useState<Zone | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
+  // Tracks when the Leaflet map instance is actually mounted and ready to draw
+  // on. The zone-rendering effect depends on this (not just on `zones`) so it
+  // reliably retries once the map exists — fixes a race where zones finished
+  // loading from the server BEFORE the map had finished initializing, silently
+  // never got drawn, and would only reappear after some unrelated re-render.
+  const [mapReady, setMapReady] = useState(false);
+  const zonesFitDoneRef = useRef(false);
 
   const drawingRef = useRef(drawing);
   drawingRef.current = drawing;
@@ -176,19 +183,22 @@ export default function AdminZones() {
 
     mapRef.current = map;
     setTimeout(() => map.invalidateSize(), 150);
+    setMapReady(true);
     return () => {
       map.remove();
       mapRef.current = null;
       mapInitRef.current = false;
+      setMapReady(false);
     };
   }, [settingsQ.isLoading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // render saved zones
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !mapReady) return;
     Object.values(layersRef.current).forEach((l) => l.remove());
     layersRef.current = {};
+    const drawnLayers: L.Polygon[] = [];
     zones.forEach((z) => {
       if (!z.polygon || z.polygon.length < 3) return;
       const poly = L.polygon(z.polygon as L.LatLngExpression[], {
@@ -203,8 +213,18 @@ export default function AdminZones() {
       });
       poly.bindTooltip(`${z.name}${z.surgeMultiplier !== 1 ? ` · ${z.surgeMultiplier}×` : ""}`, { sticky: true });
       layersRef.current[z.id] = poly;
+      drawnLayers.push(poly);
     });
-  }, [zones, drawing]);
+    // First time zones show up on a freshly-opened map, frame them all in view
+    // instead of relying on the default company-center zoom — makes sure a
+    // zone (or combination of zones) is always visible/identifiable on open,
+    // even if it's far from the default center or larger/smaller than expected.
+    if (drawnLayers.length && !zonesFitDoneRef.current && !drawingRef.current) {
+      zonesFitDoneRef.current = true;
+      const group = L.featureGroup(drawnLayers);
+      map.fitBounds(group.getBounds(), { padding: [40, 40], maxZoom: 13 });
+    }
+  }, [zones, drawing, mapReady]);
 
   // render draft polygon preview
   useEffect(() => {
