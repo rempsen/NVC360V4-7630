@@ -180,16 +180,17 @@ export const reportsRoutes = new Hono()
           const cur = ratingByRider.get(rid) ?? { sum: 0, n: 0 };
           cur.sum += Number(r.rating || 0); cur.n += 1; ratingByRider.set(rid, cur);
         }
-        const agg = new Map<string, { name: string; jobs: number; completed: number; revenue: number; pay: number; mins: number; km: number }>();
+        const agg = new Map<string, { name: string; jobs: number; completed: number; revenue: number; pay: number; mins: number; transitMins: number; km: number }>();
         for (const b of bs) {
           if (!b.riderId) continue;
           const nm = map.get(b.riderId)?.name ?? "Unknown";
-          const a = agg.get(b.riderId) ?? { name: nm, jobs: 0, completed: 0, revenue: 0, pay: 0, mins: 0, km: 0 };
+          const a = agg.get(b.riderId) ?? { name: nm, jobs: 0, completed: 0, revenue: 0, pay: 0, mins: 0, transitMins: 0, km: 0 };
           a.jobs += 1;
           if (b.status === "completed") a.completed += 1;
           a.revenue += Number(b.total || b.price || 0);
           a.pay += Number(b.techPay || 0);
           a.mins += Number(b.onSiteMinutes || 0);
+          a.transitMins += Number(b.transitMinutes || 0);
           a.km += Number(b.mileageKm || 0);
           agg.set(b.riderId, a);
         }
@@ -204,6 +205,7 @@ export const reportsRoutes = new Hono()
             pay: a.pay,
             rating: r && r.n ? r.sum / r.n : 0,
             hours: a.mins / 60,
+            transitHours: a.transitMins / 60,
             km: a.km,
           };
         }).sort((a, b) => b.revenue - a.revenue);
@@ -235,7 +237,8 @@ export const reportsRoutes = new Hono()
             { key: "revenue", label: "Revenue", kind: "money" },
             { key: "pay", label: "Tech pay", kind: "money" },
             { key: "rating", label: "Rating", kind: "num" },
-            { key: "hours", label: "Hours", kind: "num" },
+            { key: "hours", label: "On-site hrs", kind: "num" },
+            { key: "transitHours", label: "Transit hrs", kind: "num" },
             { key: "km", label: "KM", kind: "num" },
           ],
         };

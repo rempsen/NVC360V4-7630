@@ -241,12 +241,16 @@ export const bookings = sqliteTable("bookings", {
   startedAt: integer("started_at", { mode: "timestamp_ms" }),
   finishedAt: integer("finished_at", { mode: "timestamp_ms" }),
   onSiteMinutes: real("on_site_minutes").notNull().default(0), // billed minutes actually worked
+  // Elapsed drive time from "Start Driving" (enrouteAt) to first arrival on
+  // site (auto-arrive via geofence or manual "I've Arrived"). Finalized once,
+  // on arrival — mirrors how onSiteMinutes is finalized once, on completion.
+  transitMinutes: real("transit_minutes").notNull().default(0),
   // --- geofenced clock (pause/resume as tech enters/leaves job site) ---
   clockState: text("clock_state").notNull().default("idle"), // idle | running | paused
   accumulatedMs: integer("accumulated_ms").notNull().default(0), // total on-site ms banked across resume cycles
   lastResumeAt: integer("last_resume_at", { mode: "timestamp_ms" }), // when clock last started running
   insideGeofence: integer("inside_geofence", { mode: "boolean" }).notNull().default(false), // current presence at job site
-  mileageKm: real("mileage_km").notNull().default(0), // round-trip km accumulated from GPS pings
+  mileageKm: real("mileage_km").notNull().default(0), // round-trip km accumulated from GPS pings (enroute + on-site + return)
   techPay: real("tech_pay").notNull().default(0), // computed driver pay for this job (hourly)
   techPayBreakdown: text("tech_pay_breakdown").notNull().default(""), // JSON
   paymentStatus: text("payment_status").notNull().default("unpaid"), // unpaid | paid | refunded
@@ -849,6 +853,17 @@ export const intakeForms = sqliteTable("intake_forms", {
   active: integer("active", { mode: "boolean" }).notNull().default(true),
   submitCount: integer("submit_count").notNull().default(0),
   createdBy: text("created_by").notNull().default(""),
+  // "lead" = customer-facing intake (default, unchanged behavior).
+  // "work_order" = internal employee work-order creation form: PIN-gated,
+  // exposes client search/create + full catalog line-item builder + optional
+  // technician/schedule assignment, mirroring the admin work-order modal.
+  formType: text("form_type").notNull().default("lead"),
+  // shared employee access code for work_order forms (not a login — a simple
+  // shared PIN so the link alone isn't enough to create real work orders).
+  accessCode: text("access_code").notNull().default(""),
+  // work_order forms only: whether the employee submitting is allowed to pick
+  // a technician + exact schedule time, or must leave it for a dispatcher.
+  allowTechAssign: integer("allow_tech_assign", { mode: "boolean" }).notNull().default(true),
   updatedAt: integer("updated_at", { mode: "timestamp_ms" }),
   createdAt: now(),
 }, (t) => ({

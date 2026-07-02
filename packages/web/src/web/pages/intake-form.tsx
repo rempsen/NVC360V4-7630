@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useRoute } from "wouter";
 import { AddressAutocomplete } from "../components/address-autocomplete";
+import WorkOrderForm from "./work-order-form";
 
 /**
  * Standalone, embeddable customer intake form. Renders at /f/:companyId/:slug
@@ -36,6 +37,8 @@ type FormCfg = {
   successMessage: string;
   companyName: string;
   hasPublicKey: boolean;
+  formType?: string;
+  allowTechAssign?: boolean;
 };
 type Service = { id: string; name: string; category: string };
 
@@ -62,6 +65,7 @@ export default function IntakeForm() {
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState<string | null>(null);
   const [err, setErr] = useState("");
+  const [logoErr, setLogoErr] = useState(false);
 
   useEffect(() => {
     if (!companyId || !slug) return;
@@ -124,6 +128,12 @@ export default function IntakeForm() {
   }
   if (!cfg) {
     return <div className="min-h-screen grid place-items-center bg-slate-50 text-slate-400 text-sm">Loading…</div>;
+  }
+
+  // internal employee work-order creation form — entirely different flow
+  // (PIN-gated, client search/create, catalog line items, no public key needed)
+  if (cfg.formType === "work_order") {
+    return <WorkOrderForm companyId={companyId} slug={slug} cfg={cfg as any} services={services} />;
   }
 
   if (done) {
@@ -265,8 +275,8 @@ export default function IntakeForm() {
       <div className="mx-auto w-full max-w-lg">
         {/* header */}
         <div className="mb-6 text-center">
-          {cfg.logoUrl
-            ? <img src={cfg.logoUrl} alt="" className="mx-auto mb-3 max-h-12" />
+          {cfg.logoUrl && !logoErr
+            ? <img src={cfg.logoUrl} alt="" className="mx-auto mb-3 max-h-12" onError={() => setLogoErr(true)} />
             : <div className="mx-auto mb-2 text-lg font-extrabold tracking-tight" style={{ color: brand }}>{cfg.companyName}</div>}
           <h1 className="text-2xl font-bold text-slate-800">{cfg.title}</h1>
           {cfg.intro && <p className="mt-2 text-sm text-slate-500">{cfg.intro}</p>}

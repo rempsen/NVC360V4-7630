@@ -48,7 +48,15 @@ export async function applyBookingStatus(
 
   // arriving on site = clock STARTS running (first time only)
   if (status === "arrived") {
-    if (!prevB.startedAt) extra.startedAt = now;
+    if (!prevB.startedAt) {
+      extra.startedAt = now;
+      // finalize drive time: elapsed from "Start Driving" to this first
+      // arrival. One-shot, like onSiteMinutes is finalized once on
+      // completion — transit doesn't pause/resume, it's just the drive there.
+      if (prevB.enrouteAt) {
+        extra.transitMinutes = Math.max(0, Math.round(((now.getTime() - new Date(prevB.enrouteAt).getTime()) / 60000) * 10) / 10);
+      }
+    }
     // start the geofenced clock if it isn't already running
     if (prevB.clockState !== "running") {
       extra.clockState = "running";
@@ -59,7 +67,12 @@ export async function applyBookingStatus(
 
   // in_progress kept for compatibility — also ensures the clock is running
   if (status === "in_progress") {
-    if (!prevB.startedAt) extra.startedAt = now;
+    if (!prevB.startedAt) {
+      extra.startedAt = now;
+      if (prevB.enrouteAt) {
+        extra.transitMinutes = Math.max(0, Math.round(((now.getTime() - new Date(prevB.enrouteAt).getTime()) / 60000) * 10) / 10);
+      }
+    }
     if (prevB.clockState !== "running") {
       extra.clockState = "running";
       extra.lastResumeAt = now;

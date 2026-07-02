@@ -8,6 +8,46 @@ import { putObject } from "../lib/storage";
 import { rateLimit, keyByIp } from "../lib/rate-limit";
 import { fireEvent } from "../../services/dispatch";
 import { isInAnyZone } from "../../shared/zone-utils";
+import { recomputeBooking } from "../../services/billing";
+import { reconcileRiderStatus } from "../../services/presence";
+import { capture } from "../lib/analytics";
+import { incr } from "../lib/metrics";
+import {
+  normalizeCatalogItem,
+  itemUnitCost,
+  itemUnitPrice,
+  marginPct,
+  type CatalogItem,
+} from "../../shared/catalog";
+
+/** Decorate raw catalog rows with resolved cost/price (mirrors catalog.ts decorate()). */
+function decorateCatalog(rows: (typeof schema.catalogItems.$inferSelect)[]) {
+  const items: CatalogItem[] = rows.map(normalizeCatalogItem);
+  const byId = new Map(items.map((i) => [i.id, i]));
+  const lookup = (id: string) => byId.get(id);
+  return rows.map((r) => {
+    const it = normalizeCatalogItem(r);
+    const cost = itemUnitCost(it, lookup);
+    const price = itemUnitPrice(it, lookup);
+    return { ...r, components: it.components, resolvedUnitCost: cost, resolvedUnitPrice: price, resolvedMarginPct: marginPct(cost, price) };
+  });
+}
+
+/** Rate-limit for the PIN-gated employee actions on a work_order form (per IP). */
+const workOrderLimiter = rateLimit({
+  name: "public-wo",
+  limit: Number(process.env.RL_WORKORDER_LIMIT ?? 60),
+  windowMs: 60_000,
+  keyFn: keyByIp,
+});
+
+/** Constant-time-ish shared-PIN check for a work_order form. Not a real auth
+ *  session — just gates the link so it isn't wide open to the internet. */
+function checkAccessCode(form: typeof schema.intakeForms.$inferSelect, c: any): boolean {
+  if (form.formType !== "work_order") return true;
+  const code = c.req.header("x-access-code") || c.req.header("X-Access-Code") || "";
+  return !!form.accessCode && code === form.accessCode;
+}
 
 /** Fallback types for core fields that may be missing `type` in legacy rows */
 const CORE_KEY_TYPES: Record<string, string> = {
@@ -187,9 +227,85 @@ export const publicFormsRoutes = new Hono()
         successMessage: form.successMessage,
         companyName: company?.name || form.title,
         hasPublicKey: !!publicKey,
+        formType: form.formType || "lead",
+        allowTechAssign: form.allowTechAssign,
       },
       services,
     }, 200);
+  })
+
+  // ---- verify the shared employee access code (work_order forms only) ----
+  .post("/:companyId/:slug/verify-code", workOrderLimiter, async (c) => {
+    const companyId = c.req.param("companyId");
+    const slug = c.req.param("slug");
+    const form = await loadForm(companyId, slug);
+    if (!form || !form.active || form.formType !== "work_order")
+      return c.json({ message: "Form not found" }, 404);
+    const b = await c.req.json().catch(() => ({}));
+    const code = String(b.code || "").trim();
+    const ok = !!form.accessCode && code === form.accessCode;
+    return c.json({ ok }, ok ? 200 : 401);
+  })
+
+  // ---- catalog items for the work-order line-item builder (PIN required) ----
+  .get("/:companyId/:slug/catalog", workOrderLimiter, async (c) => {
+    const companyId = c.req.param("companyId");
+    const slug = c.req.param("slug");
+    const form = await loadForm(companyId, slug);
+    if (!form || !form.active || form.formType !== "work_order")
+      return c.json({ message: "Form not found" }, 404);
+    if (!checkAccessCode(form, c)) return c.json({ message: "Invalid access code" }, 401);
+
+    const q = (c.req.query("q") || "").toLowerCase();
+    const kind = c.req.query("kind");
+    let rows = await tdb(companyId).select(schema.catalogItems, eq(schema.catalogItems.active, true));
+    if (kind && kind !== "all") rows = rows.filter((r) => r.kind === kind);
+    if (q) rows = rows.filter((r) => r.name.toLowerCase().includes(q) || r.sku.toLowerCase().includes(q) || r.category.toLowerCase().includes(q));
+    rows = rows.sort((a, b) => a.name.localeCompare(b.name));
+    return c.json({ items: decorateCatalog(rows) }, 200);
+  })
+
+  // ---- search existing clients by name/email/phone (PIN required) ----
+  .get("/:companyId/:slug/clients", workOrderLimiter, async (c) => {
+    const companyId = c.req.param("companyId");
+    const slug = c.req.param("slug");
+    const form = await loadForm(companyId, slug);
+    if (!form || !form.active || form.formType !== "work_order")
+      return c.json({ message: "Form not found" }, 404);
+    if (!checkAccessCode(form, c)) return c.json({ message: "Invalid access code" }, 401);
+
+    const q = (c.req.query("q") || "").trim().toLowerCase();
+    if (q.length < 2) return c.json({ clients: [] }, 200);
+    const rows = await db
+      .select()
+      .from(schema.user)
+      .where(and(eq(schema.user.companyId, companyId), eq(schema.user.role, "customer")));
+    const matches = rows
+      .filter((u) =>
+        u.name?.toLowerCase().includes(q) ||
+        u.email?.toLowerCase().includes(q) ||
+        (u.phone || "").toLowerCase().includes(q))
+      .slice(0, 20)
+      .map((u) => ({ id: u.id, name: u.name, email: u.email, phone: u.phone || "", address: u.address || "" }));
+    return c.json({ clients: matches }, 200);
+  })
+
+  // ---- active technicians, for forms that allow tech assignment (PIN required) ----
+  .get("/:companyId/:slug/riders", workOrderLimiter, async (c) => {
+    const companyId = c.req.param("companyId");
+    const slug = c.req.param("slug");
+    const form = await loadForm(companyId, slug);
+    if (!form || !form.active || form.formType !== "work_order")
+      return c.json({ message: "Form not found" }, 404);
+    if (!checkAccessCode(form, c)) return c.json({ message: "Invalid access code" }, 401);
+    if (!form.allowTechAssign) return c.json({ riders: [] }, 200);
+
+    const rows = await tdb(companyId).select(schema.riders);
+    const out = await Promise.all(rows.map(async (r) => {
+      const [u] = await db.select().from(schema.user).where(eq(schema.user.id, r.userId)).limit(1);
+      return { id: r.id, name: u?.name || "Technician", skillClass: r.skillClass, status: r.status };
+    }));
+    return c.json({ riders: out }, 200);
   })
 
   // ---- submit (public key required) ----
@@ -199,7 +315,18 @@ export const publicFormsRoutes = new Hono()
     const form = await loadForm(companyId, slug);
     if (!form || !form.active) return c.json({ message: "Form not found" }, 404);
 
-    // ---- authenticate the publishable key ----
+    // ---- work_order forms submit through a completely different path: they
+    // create a REAL, priced work order (booking) with the same optionality as
+    // the admin work-order modal (client search/create, catalog line items,
+    // optional tech + schedule). They're gated by the shared employee PIN
+    // instead of a publishable key — no public key check applies here. ----
+    if (form.formType === "work_order") {
+      if (!checkAccessCode(form, c)) return c.json({ message: "Invalid access code" }, 401);
+      const origin = c.req.header("origin") || c.req.header("referer") || "";
+      return submitWorkOrder(c, companyId, form, origin);
+    }
+
+    // ---- authenticate the publishable key (lead forms only) ----
     const rawKey =
       c.req.header("x-public-key") ||
       c.req.header("X-Public-Key") ||
@@ -469,5 +596,172 @@ async function notifyRecipient(
     subject: `New ${form.title} submission${d.name ? ` from ${d.name}` : ""}`,
     html,
     replyTo: d.email || undefined,
+  });
+}
+
+/**
+ * Employee work-order submission (PIN-gated, no login). Creates a REAL,
+ * priced booking with the same optionality as the admin work-order modal:
+ * find-or-create client, optional technician + schedule, catalog line items
+ * (products/services/assemblies) plus ad-hoc lines, priority, notes.
+ * Mirrors POST /api/bookings/admin — kept as a separate handler since the
+ * request shape (JSON, PIN-gated, unauthenticated) differs from the admin
+ * session-authenticated route.
+ */
+async function submitWorkOrder(c: any, companyId: string, form: typeof schema.intakeForms.$inferSelect, origin: string) {
+  const body = await c.req.json().catch(() => ({}));
+  const t = tdb(companyId);
+
+  // ---- resolve or create the client ----
+  let customerId: string = String(body.customerId || "").trim();
+  if (!customerId) {
+    const name = String(body.clientName || "").trim();
+    const email = String(body.clientEmail || "").trim().toLowerCase();
+    const phone = String(body.clientPhone || "").trim();
+    const address = String(body.clientAddress || "").trim();
+    if (!name) return c.json({ message: "Client name is required (or pick an existing client)" }, 400);
+
+    let customer = email
+      ? (await db.select().from(schema.user).where(and(eq(schema.user.email, email), eq(schema.user.companyId, companyId))).limit(1))[0]
+      : undefined;
+    if (!customer) {
+      const uid = crypto.randomUUID();
+      const safeEmail = email || `client-${uid.slice(0, 8)}@${companyId}.workorder.local`;
+      const ins = await db.insert(schema.user).values({
+        id: uid, name, email: safeEmail, role: "customer", companyId,
+        phone: phone || null, address: address || null,
+      }).returning().catch(async () => {
+        const uid2 = crypto.randomUUID();
+        return db.insert(schema.user).values({
+          id: uid2, name, email: `client-${uid2.slice(0, 8)}+${companyId}@workorder.local`,
+          role: "customer", companyId, phone: phone || null, address: address || null,
+        }).returning();
+      });
+      customer = ins[0];
+    }
+    customerId = customer.id;
+  }
+  const [cu] = await db.select().from(schema.user).where(eq(schema.user.id, customerId));
+  if (!cu) return c.json({ message: "Client not found" }, 404);
+
+  // ---- service ----
+  const svc = body.serviceId
+    ? await t.selectOne(schema.services, eq(schema.services.id, body.serviceId))
+    : undefined;
+  if (!svc) return c.json({ message: "Service is required" }, 400);
+
+  // ---- optional technician (only if the form allows it) ----
+  let riderId: string | null = null;
+  if (form.allowTechAssign && body.riderId) {
+    const rider = await t.selectOne(schema.riders, eq(schema.riders.id, String(body.riderId)));
+    if (rider) riderId = rider.id;
+  }
+
+  // ---- zone enforcement, same as the admin route ----
+  if (body.lat && body.lng) {
+    const allZones = await t.select(schema.serviceZones);
+    const parsedZones = allZones.map((z) => ({ polygon: JSON.parse(z.polygon || "[]") as [number, number][], active: z.active }));
+    const activeZones = parsedZones.filter((z) => z.active && z.polygon.length >= 3);
+    if (activeZones.length > 0 && !isInAnyZone(body.lat, body.lng, parsedZones)) {
+      return c.json({ message: "Address is outside all active service zones." }, 422);
+    }
+  }
+
+  // ---- custom fields the office configured on this form (if any) ----
+  const fieldData = body.fieldData ? JSON.stringify(body.fieldData) : "{}";
+
+  // ---- schedule: optional, default to next business day like the lead path ----
+  const scheduledAt = body.scheduledAt && !isNaN(new Date(body.scheduledAt).getTime())
+    ? new Date(body.scheduledAt)
+    : new Date(Date.now() + 86400_000);
+
+  const lineItems = Array.isArray(body.lineItems) ? body.lineItems : [];
+
+  const [b] = await t.insert(schema.bookings, {
+    customerId,
+    serviceId: svc.id,
+    riderId,
+    title: body.title || svc.name,
+    priority: ["low", "normal", "high", "urgent"].includes(body.priority) ? body.priority : "normal",
+    status: riderId ? "assigned" : "confirmed",
+    scheduledAt,
+    address: body.address || cu.address || "(no address provided)",
+    lat: body.lat ?? 43.6532,
+    lng: body.lng ?? -79.3832,
+    notes: body.notes || "",
+    staffNotes: body.staffNotes || "",
+    fieldData,
+    customerPhone: body.clientPhone || cu.phone || "",
+    region: body.region || "",
+    lineItems: JSON.stringify(lineItems),
+    price: svc.basePrice,
+  });
+
+  const bill = await recomputeBooking(companyId, b.id);
+
+  const num = `INV-${Date.now().toString().slice(-6)}`;
+  const amount = bill?.subtotal ?? svc.basePrice;
+  const tax = bill?.taxAmount ?? +(svc.basePrice * 0.13).toFixed(2);
+  await t.insert(schema.invoices, {
+    bookingId: b.id, customerId, number: num, amount, tax,
+    total: bill?.total ?? +(amount + tax).toFixed(2),
+  });
+
+  if (riderId) {
+    await t.update(schema.bookings, { assignStatus: "offered", assignedAt: new Date() }, eq(schema.bookings.id, b.id));
+    await reconcileRiderStatus(companyId, riderId);
+  }
+
+  await t.insert(schema.intakeSubmissions, {
+    formId: form.id,
+    bookingId: b.id,
+    payload: JSON.stringify({ customerId, serviceId: svc.id, riderId, lineItems, submittedBy: body.submittedBy || "" }),
+    ipHash: (await hashApiKey(clientIp(c))).slice(0, 16),
+    origin,
+  });
+  await t.update(schema.intakeForms, { submitCount: (form.submitCount || 0) + 1 }, eq(schema.intakeForms.id, form.id));
+
+  fireEvent("created", b.id).catch(() => {});
+  if (riderId) fireEvent("assigned", b.id).catch(() => {});
+  incr("bookings_created_total");
+  capture("booking.created", companyId, { bookingId: b.id, serviceId: svc.id, source: "public_work_order_form" });
+
+  if (form.recipientEmail) {
+    notifyWorkOrderRecipient(form, { clientName: cu.name, service: svc.name, total: bill?.total ?? amount, submittedBy: body.submittedBy || "" })
+      .catch((e) => console.error("work order recipient email failed", e));
+  }
+
+  return c.json({ ok: true, message: form.successMessage, bookingId: b.id }, 201);
+}
+
+/** Email the configured recipient a summary of a new employee-submitted work order. */
+async function notifyWorkOrderRecipient(
+  form: typeof schema.intakeForms.$inferSelect,
+  d: { clientName: string; service: string; total: number; submittedBy: string },
+) {
+  const esc = (s: string) => String(s || "").replace(/[<>&]/g, (m) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[m]!));
+  const brand = form.brandColor || "#06b6d4";
+  const rows: Array<[string, string]> = [
+    ["Client", d.clientName],
+    ["Service", d.service],
+    ["Total", `$${d.total.toFixed(2)}`],
+    ["Submitted by", d.submittedBy || "—"],
+  ];
+  const tableRows = rows.map(([k, v], i) =>
+    `<tr style="background:${i % 2 ? "#f8fafc" : "#ffffff"}"><td style="padding:10px 14px;font-weight:600;color:#475569;white-space:nowrap">${esc(k)}</td><td style="padding:10px 14px;color:#0f172a">${esc(v)}</td></tr>`
+  ).join("");
+  const html = `
+  <div style="font-family:-apple-system,Segoe UI,Roboto,sans-serif;max-width:560px;margin:0 auto">
+    <div style="background:${brand};color:#fff;padding:18px 22px;border-radius:12px 12px 0 0">
+      <div style="font-size:13px;opacity:.85">New employee work order</div>
+      <div style="font-size:20px;font-weight:700">${esc(form.title)}</div>
+    </div>
+    <table style="width:100%;border-collapse:collapse;border:1px solid #e2e8f0;border-top:0;border-radius:0 0 12px 12px;overflow:hidden">${tableRows}</table>
+  </div>`;
+  const { sendEmail } = await import("../../services/email");
+  await sendEmail({
+    to: form.recipientName ? `${form.recipientName} <${form.recipientEmail}>` : form.recipientEmail,
+    subject: `New work order: ${d.clientName} — ${d.service}`,
+    html,
   });
 }

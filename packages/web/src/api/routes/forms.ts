@@ -3,6 +3,7 @@ import * as schema from "../database/schema";
 import { eq } from "drizzle-orm";
 import { requireAdmin, tx } from "../middleware/auth";
 import { audit } from "../lib/audit";
+import { putObject } from "../lib/storage";
 
 type SessionUser = { id: string; name?: string };
 
@@ -37,6 +38,9 @@ export const INTAKE_FIELD_CATALOG = [
 
 const slugify = (s: string) =>
   s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "intake";
+
+/** Random 6-digit shared PIN for work-order forms — easy for staff to type on a phone. */
+const genAccessCode = () => String(Math.floor(100000 + Math.random() * 900000));
 
 /**
  * Normalize stored fields to the rich shape. Backward-compatible with the old
@@ -100,12 +104,31 @@ function mask(row: typeof schema.intakeForms.$inferSelect) {
     submitCount: row.submitCount,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    formType: row.formType || "lead",
+    accessCode: row.accessCode || "",
+    allowTechAssign: row.allowTechAssign,
   };
 }
 
 export const formsRoutes = new Hono()
   // field catalog for the builder UI
   .get("/field-catalog", requireAdmin, (c) => c.json({ fields: INTAKE_FIELD_CATALOG }, 200))
+
+  // upload an intake-form header logo (multipart: file) — hosted on our storage,
+  // so it always renders on the public form/emails (unlike e.g. a pasted Google
+  // Drive share link, which requires auth and never resolves as a raw image).
+  .post("/logo", requireAdmin, async (c) => {
+    const form = await c.req.formData();
+    const file = form.get("file");
+    if (!(file instanceof File)) return c.json({ message: "No file" }, 400);
+    if (file.size > 4 * 1024 * 1024) return c.json({ message: "Logo too large (max 4MB)" }, 400);
+    if (file.type && !["image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml"].includes(file.type))
+      return c.json({ message: `Unsupported type ${file.type}` }, 400);
+    const ext = (file.name.split(".").pop() || "png").toLowerCase().slice(0, 8);
+    const key = `intake-form-logos/${crypto.randomUUID()}.${ext}`;
+    const stored = await putObject(key, Buffer.from(await file.arrayBuffer()), file.type || "image/png");
+    return c.json({ url: stored.url }, 200);
+  })
 
   // list forms for the acting tenant
   .get("/", requireAdmin, async (c) => {
@@ -132,14 +155,15 @@ export const formsRoutes = new Hono()
       slug = `${slug}-${i}`;
     }
 
+    const formType = b.formType === "work_order" ? "work_order" : "lead";
     const fields = Array.isArray(b.fields) && b.fields.length
       ? normalizeFields(b.fields)
-      : INTAKE_FIELD_CATALOG.map((f) => ({ ...f }));
+      : (formType === "work_order" ? [] : INTAKE_FIELD_CATALOG.map((f) => ({ ...f })));
     const sections = normalizeSections(b.sections);
 
     const [row] = await tx(c).insert(schema.intakeForms, {
       slug,
-      title,
+      title: title || (formType === "work_order" ? "Create Work Order" : title),
       intro: (b.intro || "").toString(),
       fields: JSON.stringify(fields),
       sections: JSON.stringify(sections),
@@ -152,6 +176,9 @@ export const formsRoutes = new Hono()
       defaultServiceId: (b.defaultServiceId || "").toString(),
       active: b.active === false ? false : true,
       createdBy: me?.id ?? "",
+      formType,
+      accessCode: formType === "work_order" ? (b.accessCode ? String(b.accessCode) : genAccessCode()) : "",
+      allowTechAssign: b.allowTechAssign === false ? false : true,
       updatedAt: new Date(),
     });
     await audit({
@@ -180,6 +207,10 @@ export const formsRoutes = new Hono()
     if (b.defaultServiceId != null) patch.defaultServiceId = String(b.defaultServiceId);
     if (b.active != null) patch.active = !!b.active;
     if (b.slug != null) patch.slug = slugify(String(b.slug));
+    if (b.formType != null) patch.formType = b.formType === "work_order" ? "work_order" : "lead";
+    if (b.accessCode != null) patch.accessCode = String(b.accessCode);
+    if (b.allowTechAssign != null) patch.allowTechAssign = !!b.allowTechAssign;
+    if (b.regenerateAccessCode) patch.accessCode = genAccessCode();
 
     const [row] = await tx(c).update(schema.intakeForms, patch, eq(schema.intakeForms.id, id));
     if (!row) return c.json({ message: "not found" }, 404);

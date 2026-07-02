@@ -24,6 +24,9 @@ import {
   Loader2,
   List,
   Calendar,
+  Clock,
+  Navigation,
+  MapPin,
 } from "lucide-react";
 import { apiHeaders } from "../lib/api";
 import { useWorkerNoun } from "../lib/use-brand";
@@ -47,6 +50,7 @@ import {
 } from "../../shared/catalog";
 import { lookupTax, regionFromAddress } from "../../shared/tax";
 import { AddressAutocomplete } from "./address-autocomplete";
+import { liveOnSiteMinutes } from "../../shared/clock";
 
 // ─── Custom field types ──────────────────────────────────────────────────────
 
@@ -1094,6 +1098,13 @@ export function WorkOrderModal({
           </div>
         )}
 
+        {/* Time & Mileage — auto-tracked from the driver app (Start Driving, geofence arrival/departure) */}
+        {isEdit && editBooking?.enrouteAt && (
+          <div className="sm:col-span-2">
+            <TimeMileagePanel booking={editBooking} />
+          </div>
+        )}
+
         {/* ── Catalog line items ── */}
         <div className="sm:col-span-2">
           <CatalogLineItems
@@ -1233,6 +1244,81 @@ export function WorkOrderModal({
         <p className="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{err}</p>
       )}
     </Modal>
+  );
+}
+
+// ─── Time & Mileage Panel ────────────────────────────────────────────────────
+// Read-only summary of what the driver app auto-tracked for this job:
+//   - Mileage: accumulated from live GPS pings starting the moment the tech
+//     tapped "Start Driving" (enrouteAt), through arrival, on-site, and return.
+//   - Transit time: elapsed from "Start Driving" to first arrival on site.
+//   - On-site time: geofence-gated clock — pauses automatically if the tech
+//     leaves the site (e.g. lunch) and resumes when they return, banked in
+//     accumulatedMs/clockState so it live-updates while running.
+// Applies to every tenant — this is booking-schema level, not per-company.
+
+function TimeMileagePanel({ booking }: { booking: any }) {
+  const [, forceTick] = useState(0);
+  const clockRunning = booking.clockState === "running";
+
+  // re-render every 30s so the live on-site minutes counter keeps advancing
+  // while this modal is open and the clock is currently running.
+  useEffect(() => {
+    if (!clockRunning) return;
+    const t = setInterval(() => forceTick((n) => n + 1), 30_000);
+    return () => clearInterval(t);
+  }, [clockRunning]);
+
+  const onSiteMins = liveOnSiteMinutes({
+    accumulatedMs: booking.accumulatedMs ?? 0,
+    clockState: booking.clockState ?? "idle",
+    lastResumeAt: booking.lastResumeAt ?? null,
+  });
+  const transitMins = Number(booking.transitMinutes || 0);
+  const km = Number(booking.mileageKm || 0);
+
+  const fmtMins = (m: number) => {
+    if (!m) return "0 min";
+    const h = Math.floor(m / 60);
+    const mm = Math.round(m % 60);
+    return h > 0 ? `${h}h ${mm}m` : `${mm} min`;
+  };
+
+  return (
+    <Field label="Time & Mileage (auto-tracked from the driver app)">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        <div className="flex items-center gap-2.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2.5">
+          <Navigation className="h-4 w-4 shrink-0 text-brand" />
+          <div className="min-w-0">
+            <p className="text-[11px] uppercase tracking-wide text-slate-500">Transit time</p>
+            <p className="text-sm font-semibold text-white">{fmtMins(transitMins)}</p>
+          </div>
+        </div>
+        <div className={`flex items-center gap-2.5 rounded-lg border px-3 py-2.5 ${
+          clockRunning ? "border-emerald-500/40 bg-emerald-500/5" : booking.clockState === "paused" ? "border-amber-500/40 bg-amber-500/5" : "border-white/10 bg-white/[0.03]"
+        }`}>
+          <Clock className={`h-4 w-4 shrink-0 ${clockRunning ? "text-emerald-400" : booking.clockState === "paused" ? "text-amber-400" : "text-brand"}`} />
+          <div className="min-w-0">
+            <p className="text-[11px] uppercase tracking-wide text-slate-500">
+              On-site time{clockRunning ? " · live" : booking.clockState === "paused" ? " · paused" : ""}
+            </p>
+            <p className="text-sm font-semibold text-white">{fmtMins(onSiteMins)}</p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2.5 rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2.5">
+          <MapPin className="h-4 w-4 shrink-0 text-brand" />
+          <div className="min-w-0">
+            <p className="text-[11px] uppercase tracking-wide text-slate-500">Total mileage</p>
+            <p className="text-sm font-semibold text-white">{km.toFixed(1)} km</p>
+          </div>
+        </div>
+      </div>
+      {booking.clockState === "paused" && (
+        <p className="mt-1.5 text-[11px] text-amber-400">
+          Technician stepped away from the job site — on-site clock is paused and will resume automatically when they return.
+        </p>
+      )}
+    </Field>
   );
 }
 

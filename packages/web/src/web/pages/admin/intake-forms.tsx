@@ -1,11 +1,17 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiHeaders } from "../../lib/api";
 import { Modal, Field, inputCls, BtnPrimary, BtnGhost, ConfirmModal } from "../../components/modal";
 import {
   FileText, Plus, Copy, Check, Trash2, ExternalLink, Code2, Pencil,
-  GripVertical, ChevronDown, ChevronUp, Mail, LayoutList, Wrench, AlertTriangle,
+  GripVertical, ChevronDown, ChevronUp, Mail, LayoutList, Wrench, AlertTriangle, Image as ImageIcon,
 } from "lucide-react";
+
+// Google Drive "share" links (e.g. drive.google.com/open?id=... or /file/d/.../view)
+// require the viewer to be signed in and never resolve as a raw <img> source —
+// pasting one here silently breaks the logo everywhere it's used. Detect it so
+// we can warn the admin instead of failing silently.
+const isGoogleDriveShareLink = (url: string) => /drive\.google\.com\/(open\?id=|file\/d\/)/i.test(url);
 
 // ---------------------------------------------------------------- types
 type FieldType =
@@ -33,6 +39,7 @@ type IntakeForm = {
   recipientName: string; recipientEmail: string;
   publicKeyId: string; brandColor: string; logoUrl: string;
   successMessage: string; active: boolean; submitCount: number; createdAt: number;
+  formType: "lead" | "work_order"; accessCode: string; allowTechAssign: boolean;
 };
 type PubKey = { id: string; label: string; prefix: string; keyType: string; active: boolean; publicKey?: string };
 
@@ -109,6 +116,7 @@ export function IntakeFormsSection({ publicKeys }: { publicKeys: PubKey[] }) {
   const qc = useQueryClient();
   const [editing, setEditing] = useState<IntakeForm | null>(null);
   const [creating, setCreating] = useState(false);
+  const [creatingType, setCreatingType] = useState<"lead" | "work_order">("lead");
   const [delTarget, setDelTarget] = useState<IntakeForm | null>(null);
   const [embedFor, setEmbedFor] = useState<IntakeForm | null>(null);
 
@@ -153,7 +161,8 @@ export function IntakeFormsSection({ publicKeys }: { publicKeys: PubKey[] }) {
         <FileText className="h-5 w-5 text-cyan-glow" />
         <h2 className="font-display text-lg font-bold text-white">Forms</h2>
         <span className="ml-auto text-xs text-slate-500">{forms.length} total</span>
-        <BtnPrimary onClick={() => setCreating(true)}><Plus className="h-4 w-4" /> New form</BtnPrimary>
+        <BtnGhost onClick={() => { setCreatingType("work_order"); setCreating(true); }}><Wrench className="h-4 w-4" /> New work order form</BtnGhost>
+        <BtnPrimary onClick={() => { setCreatingType("lead"); setCreating(true); }}><Plus className="h-4 w-4" /> New lead form</BtnPrimary>
       </div>
 
       {hasNoServices && (
@@ -191,11 +200,14 @@ export function IntakeFormsSection({ publicKeys }: { publicKeys: PubKey[] }) {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="font-semibold text-white">{f.title}</span>
+                  {f.formType === "work_order"
+                    ? <span className="inline-flex items-center gap-1 rounded-full bg-violet-500/15 px-2 py-0.5 text-[11px] font-semibold text-violet-300"><Wrench className="h-3 w-3" /> Work order</span>
+                    : <span className="rounded-full bg-cyan-500/15 px-2 py-0.5 text-[11px] font-semibold text-cyan-300">Lead</span>}
                   {f.active
                     ? <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] font-semibold text-emerald-300">Live</span>
                     : <span className="rounded-full bg-slate-500/15 px-2 py-0.5 text-[11px] font-semibold text-slate-400">Disabled</span>}
                   {!f.publicKeyId && <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] font-semibold text-amber-300">No key bound</span>}
-                  {!f.recipientEmail && <span className="rounded-full bg-rose-500/15 px-2 py-0.5 text-[11px] font-semibold text-rose-300">No recipient</span>}
+                  {f.formType === "lead" && !f.recipientEmail && <span className="rounded-full bg-rose-500/15 px-2 py-0.5 text-[11px] font-semibold text-rose-300">No recipient</span>}
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-500">
                   <code className="text-slate-400">/f/{f.companyId}/{f.slug}</code>
@@ -219,6 +231,7 @@ export function IntakeFormsSection({ publicKeys }: { publicKeys: PubKey[] }) {
       {(creating || editing) && (
         <FormEditor
           form={editing}
+          newFormType={creatingType}
           publicKeys={activePubKeys}
           onKeysChanged={() => qc.invalidateQueries({ queryKey: ["api-keys"] })}
           onClose={() => { setCreating(false); setEditing(null); }}
@@ -242,20 +255,41 @@ export function IntakeFormsSection({ publicKeys }: { publicKeys: PubKey[] }) {
 }
 
 // ================================================================ EDITOR
-function FormEditor({ form, publicKeys, onKeysChanged, onClose, onSaved }: { form: IntakeForm | null; publicKeys: PubKey[]; onKeysChanged: () => void; onClose: () => void; onSaved: () => void }) {
+function FormEditor({ form, newFormType, publicKeys, onKeysChanged, onClose, onSaved }: { form: IntakeForm | null; newFormType: "lead" | "work_order"; publicKeys: PubKey[]; onKeysChanged: () => void; onClose: () => void; onSaved: () => void }) {
   const editing = !!form;
-  const [title, setTitle] = useState(form?.title ?? "Request Service");
+  const formType = form?.formType ?? newFormType;
+  const isWorkOrder = formType === "work_order";
+  const [accessCode, setAccessCode] = useState(form?.accessCode ?? "");
+  const [allowTechAssign, setAllowTechAssign] = useState(form?.allowTechAssign ?? true);
+  const [title, setTitle] = useState(form?.title ?? (isWorkOrder ? "Create Work Order" : "Request Service"));
   const [intro, setIntro] = useState(form?.intro ?? "");
   const [slug, setSlug] = useState(form?.slug ?? "");
   const [brandColor, setBrandColor] = useState(form?.brandColor ?? "#06b6d4");
   const [logoUrl, setLogoUrl] = useState(form?.logoUrl ?? "");
+  const [logoUploading, setLogoUploading] = useState(false);
+  const logoFileRef = useRef<HTMLInputElement>(null);
+  const uploadLogo = async (file: File) => {
+    setLogoUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await fetch("/api/forms/logo", { method: "POST", body: fd, credentials: "include", headers: apiHeaders() });
+      const d = await res.json();
+      if (res.ok && d.url) setLogoUrl(d.url);
+      else alert(d.message || "Upload failed");
+    } finally {
+      setLogoUploading(false);
+    }
+  };
   const [successMessage, setSuccessMessage] = useState(form?.successMessage ?? "Thanks! We've received your request and will reach out shortly.");
   const [publicKeyId, setPublicKeyId] = useState(form?.publicKeyId ?? (publicKeys[0]?.id ?? ""));
   const [active, setActive] = useState(form?.active ?? true);
   const [recipientName, setRecipientName] = useState(form?.recipientName ?? "");
   const [recipientEmail, setRecipientEmail] = useState(form?.recipientEmail ?? "");
   const [sections, setSections] = useState<SectionCfg[]>(form?.sections?.length ? form.sections : []);
-  const [fields, setFields] = useState<FieldCfg[]>(form?.fields?.length ? form.fields.map((f) => ({ ...f })) : DEFAULT_FIELDS.map((f) => ({ ...f })));
+  const [fields, setFields] = useState<FieldCfg[]>(
+    form?.fields?.length ? form.fields.map((f) => ({ ...f })) : (isWorkOrder ? [] : DEFAULT_FIELDS.map((f) => ({ ...f })))
+  );
 
   // ---- field ops ----
   const patchField = (id: string, p: Partial<FieldCfg>) =>
@@ -303,6 +337,8 @@ function FormEditor({ form, publicKeys, onKeysChanged, onClose, onSaved }: { for
       const body = {
         title, intro, slug: slug || undefined, brandColor, logoUrl, successMessage, publicKeyId, active,
         recipientName, recipientEmail, sections, fields: cleanFields,
+        formType,
+        ...(isWorkOrder ? { allowTechAssign, accessCode } : {}),
       };
       return editing ? jsend(`/api/forms/${form!.id}`, "PATCH", body) : jsend("/api/forms", "POST", body);
     },
@@ -318,8 +354,10 @@ function FormEditor({ form, publicKeys, onKeysChanged, onClose, onSaved }: { for
   return (
     <Modal
       open onClose={onClose}
-      title={editing ? "Edit intake form" : "New intake form"}
-      subtitle="Customer-facing form that creates a new lead on submit and emails your recipient."
+      title={editing ? `Edit ${isWorkOrder ? "work order" : "intake"} form` : `New ${isWorkOrder ? "work order" : "intake"} form`}
+      subtitle={isWorkOrder
+        ? "Internal, PIN-gated form for employees to create real work orders without logging in."
+        : "Customer-facing form that creates a new lead on submit and emails your recipient."}
       size="lg"
       footer={
         <>
@@ -338,13 +376,45 @@ function FormEditor({ form, publicKeys, onKeysChanged, onClose, onSaved }: { for
         </div>
         <Field label="Intro text (optional)"><input aria-label="intro" className={inputCls} value={intro} onChange={(e) => setIntro(e.target.value)} placeholder="Tell us what you need and we'll get back fast." /></Field>
 
+        {isWorkOrder && (
+          <div className="rounded-xl border border-violet-500/30 bg-violet-500/5 p-4">
+            <div className="mb-2 flex items-center gap-2">
+              <Wrench className="h-4 w-4 text-violet-300" />
+              <h3 className="text-sm font-bold text-white">Employee access</h3>
+            </div>
+            <p className="mb-3 text-xs text-slate-400">
+              This link is public but not open to customers — anyone submitting must know this shared PIN. Give it to your team; rotate it any time.
+            </p>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Shared access code (PIN)">
+                <div className="flex items-center gap-2">
+                  <input aria-label="Access code" className={`${inputCls} font-mono tracking-widest`} value={accessCode}
+                    onChange={(e) => setAccessCode(e.target.value.replace(/\D/g, "").slice(0, 8))}
+                    placeholder="123456" />
+                  <button type="button"
+                    onClick={() => setAccessCode(String(Math.floor(100000 + Math.random() * 900000)))}
+                    className="shrink-0 rounded-lg border border-white/10 px-2.5 py-2 text-xs font-semibold text-slate-300 hover:bg-white/5">
+                    Generate
+                  </button>
+                </div>
+              </Field>
+              <div className="flex items-end pb-1">
+                <label className="flex items-center gap-2 text-sm text-slate-300">
+                  <input type="checkbox" checked={allowTechAssign} onChange={(e) => setAllowTechAssign(e.target.checked)} className="h-4 w-4 rounded border-white/20" />
+                  Employees can pick a technician & schedule time
+                </label>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* ---- MASTER: recipient ---- */}
         <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-4">
           <div className="mb-2 flex items-center gap-2">
             <Mail className="h-4 w-4 text-cyan-glow" />
-            <h3 className="text-sm font-bold text-white">Where submissions are sent</h3>
+            <h3 className="text-sm font-bold text-white">{isWorkOrder ? "Notify a manager on every new work order" : "Where submissions are sent"}</h3>
           </div>
-          <p className="mb-3 text-xs text-slate-400">Every submission emails this person the full details (a pipeline lead is still created).</p>
+          <p className="mb-3 text-xs text-slate-400">{isWorkOrder ? "Optional — get an email summary every time an employee submits a work order (a real job is created either way)." : "Every submission emails this person the full details (a pipeline lead is still created)."}</p>
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Recipient name"><input aria-label="Recipient name" className={inputCls} value={recipientName} onChange={(e) => setRecipientName(e.target.value)} placeholder="Jane Dispatch" /></Field>
             <Field label="Recipient email"><input aria-label="Recipient email" type="email" className={inputCls} value={recipientEmail} onChange={(e) => setRecipientEmail(e.target.value)} placeholder="intake@company.com" /></Field>
@@ -367,7 +437,27 @@ function FormEditor({ form, publicKeys, onKeysChanged, onClose, onSaved }: { for
         </Field>
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Brand color"><input aria-label="Brand Color" type="color" className="h-10 w-full rounded-lg border border-white/10 bg-ink-3" value={brandColor} onChange={(e) => setBrandColor(e.target.value)} /></Field>
-          <Field label="Logo URL (optional)"><input aria-label="logo" className={inputCls} value={logoUrl} onChange={(e) => setLogoUrl(e.target.value)} placeholder="https://…/logo.png" /></Field>
+          <Field label="Logo (optional)">
+            <div className="flex items-center gap-2">
+              {logoUrl && !isGoogleDriveShareLink(logoUrl) ? (
+                <img src={logoUrl} alt="" className="h-9 w-9 shrink-0 rounded-md border border-white/10 object-contain bg-white/90 p-0.5" />
+              ) : (
+                <div className="grid h-9 w-9 shrink-0 place-items-center rounded-md border border-white/10 bg-white/5"><ImageIcon className="h-4 w-4 text-slate-500" /></div>
+              )}
+              <button type="button" onClick={() => logoFileRef.current?.click()} disabled={logoUploading}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-cyan-500/40 bg-cyan-500/10 px-2.5 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/20 disabled:opacity-60">
+                {logoUploading ? "Uploading…" : "Upload"}
+              </button>
+              {logoUrl && <button type="button" onClick={() => setLogoUrl("")} className="shrink-0 text-xs font-semibold text-slate-400 hover:text-red-400">Remove</button>}
+              <input ref={logoFileRef} type="file" accept="image/*" className="hidden" onChange={(e) => e.target.files?.[0] && uploadLogo(e.target.files[0])} />
+            </div>
+            <input aria-label="logo" className={`${inputCls} mt-1.5 text-xs`} value={logoUrl} onChange={(e) => setLogoUrl(e.target.value)} placeholder="…or paste a direct image URL" />
+            {isGoogleDriveShareLink(logoUrl) && (
+              <p className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-amber-400">
+                <AlertTriangle className="h-3 w-3" /> This is a Google Drive share link — it won't display on the public form or in emails. Use "Upload" above instead.
+              </p>
+            )}
+          </Field>
         </div>
         <Field label="Success message"><input aria-label="Success Message" className={inputCls} value={successMessage} onChange={(e) => setSuccessMessage(e.target.value)} /></Field>
 
@@ -375,11 +465,16 @@ function FormEditor({ form, publicKeys, onKeysChanged, onClose, onSaved }: { for
         <div>
           <div className="mb-2 flex items-center gap-2">
             <LayoutList className="h-4 w-4 text-slate-400" />
-            <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Form fields</span>
+            <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">{isWorkOrder ? "Extra questions (optional)" : "Form fields"}</span>
             <div className="ml-auto flex gap-2">
               <button type="button" onClick={addSection} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-semibold text-slate-300 hover:bg-white/5"><Plus className="h-3.5 w-3.5" /> Section</button>
             </div>
           </div>
+          {isWorkOrder && (
+            <p className="mb-2 -mt-1 text-[11px] text-slate-500">
+              Client, service, priority, schedule, technician, and pricing/line-items are always on the work-order form automatically. Add fields here only for extra job-specific questions.
+            </p>
+          )}
 
           <div className="space-y-4">
             {groups.map(({ sec, items }) => (

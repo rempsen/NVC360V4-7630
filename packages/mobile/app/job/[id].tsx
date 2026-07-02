@@ -68,6 +68,15 @@ const FLOW: Record<string, { next: string; label: string; variant: any; hint?: s
 // states where we keep pinging GPS (drives mileage + geofence auto-arrive/clock)
 const ACTIVE_PING = new Set(["enroute", "arrived", "in_progress"]);
 
+function fmtMinutes(min: number | undefined | null): string {
+  const m = Math.round(min ?? 0);
+  if (m <= 0) return "—";
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  const rem = m % 60;
+  return rem > 0 ? `${h}h ${rem}m` : `${h}h`;
+}
+
 export default function JobDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -511,6 +520,37 @@ export default function JobDetail() {
                             : ""
                         }`}
                   </Text>
+                </View>
+              </View>
+            )}
+
+            {/* Trip stats: transit time, on-site time, mileage — visible from enroute onward */}
+            {j.enrouteAt && (
+              <View style={s.statsRow}>
+                <View style={s.statCard}>
+                  <Car color={C.cyan} size={18} weight="fill" />
+                  <Text style={s.statVal}>{fmtMinutes(j.transitMinutes)}</Text>
+                  <Text style={s.statLbl}>Transit</Text>
+                </View>
+                <View style={s.statCard}>
+                  <Clock
+                    color={j.clockState === "paused" ? C.muted : C.green}
+                    size={18}
+                    weight="fill"
+                  />
+                  <Text style={s.statVal}>
+                    {typeof j.onSiteMinutes === "number" ? fmtMinutes(j.onSiteMinutes) : "—"}
+                  </Text>
+                  <Text style={s.statLbl}>
+                    {j.clockState === "paused" ? "On site (paused)" : "On site"}
+                  </Text>
+                </View>
+                <View style={s.statCard}>
+                  <Ruler color={C.cyan} size={18} weight="fill" />
+                  <Text style={s.statVal}>
+                    {typeof j.mileageKm === "number" ? `${j.mileageKm.toFixed(1)} km` : "—"}
+                  </Text>
+                  <Text style={s.statLbl}>Mileage</Text>
                 </View>
               </View>
             )}
@@ -1018,9 +1058,13 @@ export default function JobDetail() {
                   const timeStr = onSiteMin >= 60
                     ? `${Math.floor(onSiteMin / 60)}h ${onSiteMin % 60}m`
                     : onSiteMin > 0 ? `${onSiteMin} min` : null;
+                  const transitStr = fmtMinutes(j.transitMinutes);
+                  const mileageStr = typeof j.mileageKm === "number" ? `${j.mileageKm.toFixed(1)} km` : null;
 
                   const lines: string[] = [];
+                  if (transitStr !== "—") lines.push(`🚗 Time in transit: ${transitStr}`);
                   if (timeStr) lines.push(`⏱ Time on site: ${timeStr}`);
+                  if (mileageStr) lines.push(`📍 Total mileage: ${mileageStr}`);
                   lines.push(`📸 Photos: ${photoCount}`);
                   if (unchecked > 0) lines.push(`⚠️ ${unchecked} checklist item${unchecked > 1 ? "s" : ""} not done`);
                   lines.push(`💰 Earning: ${money(j.price)}`);
@@ -1137,6 +1181,20 @@ const s = StyleSheet.create({
   },
   clockBig: { color: C.text, fontSize: 15, fontWeight: "800" },
   clockSub: { color: C.sub, fontSize: 12, marginTop: 2, lineHeight: 16 },
+  statsRow: { flexDirection: "row", gap: 8, marginTop: 12 },
+  statCard: {
+    flex: 1,
+    alignItems: "center",
+    gap: 4,
+    paddingVertical: 12,
+    paddingHorizontal: 6,
+    borderRadius: 12,
+    backgroundColor: "rgba(148,163,184,0.08)",
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  statVal: { color: C.text, fontSize: 14, fontWeight: "800" },
+  statLbl: { color: C.muted, fontSize: 10.5, fontWeight: "600", textAlign: "center" },
   eta: { color: C.cyan, fontSize: 12, fontWeight: "800" },
   notes: { color: C.text, fontSize: 14, lineHeight: 21, marginTop: 8 },
   fieldRow: { flexDirection: "row", justifyContent: "space-between", gap: 12, paddingVertical: 7, borderBottomWidth: 1, borderBottomColor: C.border },
