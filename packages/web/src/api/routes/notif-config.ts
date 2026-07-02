@@ -95,7 +95,8 @@ export const notifConfigRoutes = new Hono()
   // ---- template preview (interpolate {{vars}} against sample data) ----
   .post("/preview", requireAdmin, async (c) => {
     const { template } = await c.req.json();
-    return c.json({ rendered: interpolateSample(template || "") }, 200);
+    const channels = await tx(c).selectOne(schema.notificationChannels);
+    return c.json({ rendered: interpolateSample(template || "", channels?.emailFromName) }, 200);
   })
 
   // ---- render a full branded HTML email from a block design (live editor preview) ----

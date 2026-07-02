@@ -142,9 +142,11 @@ export function defaultTemplateFor(event: NvcEvent, recipient: Recipient): strin
   return defaultMessage(event, recipient, SAMPLE_VARS);
 }
 
-/** Render a template against sample data for preview. Empty => empty. */
-export function interpolateSample(tpl: string): string {
-  return interpolate(tpl, SAMPLE_VARS);
+/** Render a template against sample data for preview. Empty => empty.
+ *  `company` overrides SAMPLE_VARS.company so previews reflect the active
+ *  tenant (e.g. "BMD Materials") instead of always showing "NVC 360". */
+export function interpolateSample(tpl: string, company?: string): string {
+  return interpolate(tpl, company ? { ...SAMPLE_VARS, company } : SAMPLE_VARS);
 }
 
 /**
@@ -163,8 +165,13 @@ async function channelConfig(companyId: string) {
 /** Render a full branded email design against sample data — for the live editor preview. */
 export async function renderDesignPreview(companyId: string, blocks: EmailBlock[], opts?: { footer?: string; origin?: string }): Promise<string> {
   const cfg = await channelConfig(companyId);
+  const companyName = cfg?.emailFromName || SAMPLE_VARS.company;
+  // {{company}} inside block text/tokens must reflect the ACTIVE tenant, not the
+  // hardcoded sample — otherwise switching tenants (e.g. NVC360 -> BMD Materials)
+  // leaves stale copy like "reply to this email, NVC360" in another company's emails.
+  const vars: Vars = { ...SAMPLE_VARS, company: companyName };
   const brand: EmailBrand = {
-    company: cfg?.emailFromName || SAMPLE_VARS.company,
+    company: companyName,
     logoUrl: cfg?.emailLogoUrl || "",
     brandColor: cfg?.emailBrandColor || "#06B6D4",
     headerStyle: (cfg?.emailHeaderStyle as any) || "gradient",
@@ -172,14 +179,16 @@ export async function renderDesignPreview(companyId: string, blocks: EmailBlock[
     footer: opts?.footer ?? cfg?.emailFooter ?? "",
     origin: opts?.origin || "",
   };
-  return renderEmailDesign(blocks || [], brand, (s) => interpolate(s, SAMPLE_VARS));
+  return renderEmailDesign(blocks || [], brand, (s) => interpolate(s, vars));
 }
 
 /** Send a one-off test email rendered from a block design. */
 export async function sendDesignTest(companyId: string, to: string, subject: string, blocks: EmailBlock[], origin?: string): Promise<{ ok: boolean; error?: string; skipped?: boolean }> {
   const cfg = await channelConfig(companyId);
+  const companyName = cfg?.emailFromName || SAMPLE_VARS.company;
+  const vars: Vars = { ...SAMPLE_VARS, company: companyName };
   const brand: EmailBrand = {
-    company: cfg?.emailFromName || SAMPLE_VARS.company,
+    company: companyName,
     logoUrl: cfg?.emailLogoUrl || "",
     brandColor: cfg?.emailBrandColor || "#06B6D4",
     headerStyle: (cfg?.emailHeaderStyle as any) || "gradient",
@@ -187,7 +196,7 @@ export async function sendDesignTest(companyId: string, to: string, subject: str
     footer: cfg?.emailFooter || "",
     origin: origin || "",
   };
-  const interp = (s: string) => interpolate(s, SAMPLE_VARS);
+  const interp = (s: string) => interpolate(s, vars);
   const html = renderEmailDesign(blocks || [], brand, interp);
   const text = designToText(blocks || [], interp);
   let emailFrom: string | undefined;

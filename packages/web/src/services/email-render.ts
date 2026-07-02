@@ -125,7 +125,12 @@ export function renderEmailDesign(
       </td></tr>
       ${
         brand.footer
-          ? `<tr><td style="padding:18px 34px;border-top:1px solid #e2e8f0;background:#f8fafc;font-size:12px;line-height:1.6;color:#94a3b8;text-align:center">${inlineFormat(interpolate(brand.footer))}</td></tr>`
+          ? // Footer is system-generated markup (buildEmailFooter in dispatch.ts —
+            // <strong>/<a>/<br/> for the company name, address, phone, email, site)
+            // so it must render as trusted HTML, not run through inlineFormat's
+            // esc()-then-markdown pass — that was escaping the tags into visible
+            // "<strong>Company</strong>" text instead of rendering them.
+            `<tr><td style="padding:18px 34px;border-top:1px solid #e2e8f0;background:#f8fafc;font-size:12px;line-height:1.6;color:#94a3b8;text-align:center">${interpolate(brand.footer)}</td></tr>`
           : ""
       }
     </table>
