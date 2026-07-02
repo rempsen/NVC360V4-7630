@@ -48,7 +48,8 @@ function buildState(job: LiveActivityJobState) {
     : undefined;
 
   return {
-    title: `NVC360 · ${label}`,
+    // Brand is carried by the logo badge now — no redundant "NVC360 ·" prefix in the title.
+    title: label,
     subtitle: job.clientName ? `${job.clientName} · ${job.address}` : job.address,
     progressBar: etaMs
       ? { date: etaMs }                               // countdown timer to ETA
@@ -61,13 +62,17 @@ function buildState(job: LiveActivityJobState) {
 function buildConfig(status: string) {
   const isComplete = status === "completed";
   return {
-    backgroundColor: isComplete ? "065f46" : "0c1a2e",   // dark navy; green on complete
-    titleColor: "0ea5e9",
-    subtitleColor: "FFFFFF99",
+    backgroundColor: isComplete ? "064e3b" : "070b12",   // brand ink navy; deep green on complete
+    titleColor: "FFFFFF",
+    subtitleColor: "8FA3B8",
     progressViewTint: "0ea5e9",
     progressViewLabelColor: "FFFFFF",
     timerType: "digital" as const,
-    padding: { horizontal: 16, top: 12, bottom: 12 },
+    padding: { horizontal: 16, top: 14, bottom: 14 },
+    imagePosition: "right" as const,
+    imageAlign: "center" as const,
+    imageSize: { width: 46, height: 46 },
+    contentFit: "contain" as const,
     deepLinkUrl: `/job/${isComplete ? "" : ""}`,
   };
 }
