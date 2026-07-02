@@ -1,38 +1,32 @@
-# Push notifications + app badge for dispatcher -> driver messages
+# Bring full pricing power to the public Work Order intake form
 
-## Root cause found
-Job-status events (assigned/enroute/etc, via dispatch.ts fireEvent) already
-call sendPush() correctly — that's why those show up as banners even when the
-app is backgrounded/closed. But the actual chat/messaging routes in
-messages.ts (POST /dispatch/:techId direct message, POST /broadcast) NEVER
-call sendPush() at all — they only insert a `notifications` DB row, which is
-only visible if the user opens the app and looks. That's the whole bug: no
-push = no banner when backgrounded/closed, and no APNs badge count sent
-either (push.ts's PushMessage type has a `badge` field but nothing ever
-populates it).
+## Gap identified (user screenshots)
+Admin "New Work Order" modal has full pricing: Products & materials (catalog),
+Per-unit line items, AND "Charges" (flat fee / hourly / per-unit ad-hoc via
+ChargesEditor) with tax-aware price preview + region.
 
-## Fix
-1. push.ts: sendPush() accepts an optional `badge` count, forwarded to Expo's
-   push payload (badge is what sets the iOS app-icon number; Android best-effort
-   depending on launcher, but the in-tray count updates regardless).
-2. messages.ts: add unreadDirectCountForRider() helper (mirrors the existing
-   /direct/unread query). Call sendPush() with this badge count from:
-   - POST /dispatch/:techId (dispatcher -> single tech)
-   - POST /broadcast (dispatcher -> many techs)
-3. Mobile: keep the OS badge in sync locally too (belt & suspenders in case a
-   push is delayed/coalesced) — call Notifications.setBadgeCountAsync() from
-   the existing unread-count query in (rider)/_layout.tsx, and reset to 0 when
-   the direct thread is read (messages.tsx).
-4. push tap handling: route to the Messages tab when a message push (no
-   bookingId) is tapped.
+Public work-order-form.tsx (online intake) only has: catalog picker + one
+flat "custom line" (ad-hoc per-unit only, no flat fee, no hourly, no region/
+tax preview). Missing: ChargesEditor parity, rateModel/hourly billing, region
+resolution, live price preview with tax.
 
-## Scope decision
-Scoped to the direct dispatcher<->tech thread (the "Messages" tab) — this
-matches exactly what the user described and is the only thread with reliable
-per-tech unread tracking already built. Job-thread (per-booking, 3-party)
-messages have a single shared `read` flag with no per-viewer semantics; adding
-per-tech unread tracking there would require a schema change and touches
-customer/dispatch flows too — flagged as a possible follow-up, not done here
-to avoid destabilizing a live production read-tracking behavior.
+## Plan
+1. Reuse `ChargesEditor` + `chargesSummary` + `Charge` type directly in
+   work-order-form.tsx (already a shared web component, safe to import from a
+   public page — no auth-only deps inside it).
+2. Add `charges` state + region state + auto-resolve region from address
+   (regionFromAddress, same as admin modal).
+3. Mirror `buildPayload()`'s charge->lineItem conversion (flat_fee/per_unit ->
+   buildUnitLineItem lines, hourly -> rateModel) exactly as work-order-modal.tsx
+   does, so submitted work orders are billing-identical regardless of which
+   form created them.
+4. Add a live price preview (subtotal / tax / total) using the same lookupTax
+   + sumLineItems math, matching the admin modal's "Price preview" panel.
+5. Backend (public-forms.ts submitWorkOrder): currently does NOT persist
+   rateModel at all — add `rateModel: body.rateModel ? JSON.stringify(...) : ""`
+   to the booking insert so hourly charges actually take effect (recomputeBooking
+   already reads rateModel from the booking correctly once it's stored).
+6. Verify: tsc, tests, build, live E2E test (flat fee + hourly + per-unit +
+   catalog item all in one submission, confirm total matches admin-side math).
 
 ## Status: IN PROGRESS

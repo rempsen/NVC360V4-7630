@@ -4,6 +4,8 @@ import {
   buildLineItem, buildUnitLineItem, sumLineItems, normalizeCatalogItem,
   itemUnitPrice, type CatalogItem, type LineItem,
 } from "../../shared/catalog";
+import { lookupTax, regionFromAddress } from "../../shared/tax";
+import { ChargesEditor, chargesSummary, type Charge } from "../components/charges-editor";
 import { money } from "../lib/utils";
 
 /**
@@ -150,6 +152,11 @@ function WorkOrderBuilder({ companyId, slug, cfg, services, brand, publicKey }: 
   const [riderId, setRiderId] = useState("");
   const [riders, setRiders] = useState<Rider[]>([]);
   const [submittedBy, setSubmittedBy] = useState("");
+  // tax region — auto-resolved from whichever address is entered (job address
+  // takes priority; falls back to the new-client address), same behavior as
+  // the admin work-order modal.
+  const [region, setRegion] = useState("");
+  const [regionTouched, setRegionTouched] = useState(false);
 
   useEffect(() => {
     if (!cfg.allowTechAssign) return;
@@ -157,6 +164,17 @@ function WorkOrderBuilder({ companyId, slug, cfg, services, brand, publicKey }: 
       .then((r) => r.json()).then((d) => setRiders(d.riders || [])).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // auto-resolve tax region from whichever address is available, unless the
+  // employee already picked one manually.
+  useEffect(() => {
+    if (regionTouched) return;
+    const src = address || (clientMode === "new" ? newClient.address : client?.address) || "";
+    if (!src) return;
+    const r = regionFromAddress(src);
+    if (r) setRegion(r);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address, newClient.address, client]);
 
   // ---- catalog / line items ----
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
@@ -203,6 +221,37 @@ function WorkOrderBuilder({ companyId, slug, cfg, services, brand, publicKey }: 
     return i.name.toLowerCase().includes(s) || i.sku.toLowerCase().includes(s) || i.category.toLowerCase().includes(s);
   });
 
+  // ---- charges: flat fee / hourly / per-unit — same builder + math as the
+  // admin work-order modal, so a job priced from this form and one priced in
+  // the office come out billing-identical. ----
+  const [charges, setCharges] = useState<Charge[]>([]);
+  const pricePreview = useMemo(() => {
+    const { techTotal: chargesTechTotal } = chargesSummary(charges);
+    // only flat_fee and per_unit have a known amount up front; hourly is
+    // billed once the job's actual time is recorded.
+    const chargesKnown = charges.reduce((s, c) => {
+      if (c.type === "flat_fee") return s + c.amount;
+      if (c.type === "per_unit") return s + c.qty * c.unitPrice;
+      return s;
+    }, 0);
+
+    const cat = sumLineItems(lineItems);
+    const subtotal = Math.round((chargesKnown + cat.price) * 100) / 100;
+    const tax = lookupTax(region);
+    const taxRate = tax?.rate ?? 0;
+    const taxableBase = chargesKnown + cat.taxablePrice;
+    const taxAmount = Math.round((taxableBase * taxRate)) / 100;
+    const total = Math.round((subtotal + taxAmount) * 100) / 100;
+
+    return {
+      subtotal, chargesKnown, chargesTechTotal,
+      lineItemsPrice: cat.price,
+      taxLabel: tax?.label ?? "No tax region",
+      taxAmount, total,
+      hasHourly: charges.some((c) => c.type === "hourly"),
+    };
+  }, [charges, region, lineItems]);
+
   // ---- extra custom fields configured on the form ----
   const [customVals, setCustomVals] = useState<Record<string, string>>({});
   const customFields = (cfg.fields || []).filter((f) => f.enabled);
@@ -220,11 +269,40 @@ function WorkOrderBuilder({ companyId, slug, cfg, services, brand, publicKey }: 
     if (!client && !(clientMode === "new" && newClient.name.trim())) { setErr("Pick a client or add a new one."); return; }
     setSubmitting(true);
     try {
+      // convert ChargesEditor charges into LineItem records + a rate model,
+      // exactly like the admin work-order modal's buildPayload() does, so a
+      // job priced here bills identically to one priced in the office.
+      const chargeLineItems: LineItem[] = charges.map((c) => {
+        if (c.type === "per_unit") {
+          return buildUnitLineItem({
+            name: c.name || "Line item", unit: c.unit || "each", qty: c.qty,
+            unitPrice: c.unitPrice, unitPayRate: c.unitPayRate, taxable: true,
+          });
+        }
+        return buildUnitLineItem({
+          name: c.type === "flat_fee" ? (c.label || "Flat fee") : (c.label || "Hourly charge"),
+          unit: "job", qty: 1,
+          unitPrice: c.type === "flat_fee" ? c.amount : 0,
+          unitPayRate: c.type === "flat_fee" ? c.techPay : 0,
+          taxable: true,
+        });
+      });
+      const hourlyCharge = charges.find((c) => c.type === "hourly");
+      const rateModel = hourlyCharge ? {
+        flatRate: 0, includedMinutes: 0, includedKm: 0, timeRate: 0, timeUnit: "hour" as const,
+        kmRate: 0, minCharge: 0,
+        freeMinutes: hourlyCharge.freeMinutes,
+        firstHourRate: hourlyCharge.firstHourRate,
+        additionalHourRate: hourlyCharge.additionalHourRate,
+      } : undefined;
+
       const body: Record<string, any> = {
         serviceId, priority, notes, staffNotes: "",
         address: address || client?.address || newClient.address || "",
         submittedBy,
-        lineItems,
+        region: region || undefined,
+        lineItems: [...lineItems, ...chargeLineItems],
+        ...(rateModel ? { rateModel } : {}),
       };
       if (client) body.customerId = client.id;
       else {
@@ -461,6 +539,53 @@ function WorkOrderBuilder({ companyId, slug, cfg, services, brand, publicKey }: 
                 </div>
               </div>
             )}
+          </section>
+
+          {/* ---- charges: flat fee / hourly / per-unit ---- */}
+          <section className="space-y-3">
+            <div>
+              <h2 className="border-b border-slate-100 pb-2 text-sm font-bold text-slate-800">Charges</h2>
+              <p className="mt-1.5 text-xs text-slate-500">Add a call-out fee, hourly labor, or any per-unit charge — same pricing tools the office uses.</p>
+            </div>
+            {/* ChargesEditor is built for the app's dark theme — render it in its
+                native dark card rather than fighting its styling with overrides. */}
+            <div className="rounded-xl bg-[#0b1220] p-3">
+              <ChargesEditor charges={charges} onChange={setCharges} />
+            </div>
+          </section>
+
+          {/* ---- tax region + price preview ---- */}
+          <section className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <Field label="Tax region" hint="Auto-detected from the address; change if needed.">
+                <select aria-label="Tax region" className={inputCls} style={ring(brand)} value={region} onChange={(e) => { setRegion(e.target.value); setRegionTouched(true); }}>
+                  <option value="">No tax</option>
+                  {["AB","BC","MB","NB","NL","NS","NT","NU","ON","PE","QC","SK","YT"].map((r) => <option key={r} value={r}>{r}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">Price preview</div>
+              <div className="space-y-1 text-sm">
+                {pricePreview.lineItemsPrice > 0 && (
+                  <div className="flex justify-between text-slate-600"><span>Line items</span><span>{money(pricePreview.lineItemsPrice)}</span></div>
+                )}
+                {pricePreview.chargesKnown > 0 && (
+                  <div className="flex justify-between text-slate-600"><span>Charges</span><span>{money(pricePreview.chargesKnown)}</span></div>
+                )}
+                {pricePreview.hasHourly && (
+                  <div className="flex justify-between text-slate-400 italic"><span>Hourly charge</span><span>billed at job time</span></div>
+                )}
+                <div className="flex justify-between text-slate-600"><span>Subtotal</span><span>{money(pricePreview.subtotal)}</span></div>
+                <div className="flex justify-between text-slate-500 text-xs"><span>{pricePreview.taxLabel}</span><span>{money(pricePreview.taxAmount)}</span></div>
+                <div className="mt-1 flex justify-between border-t border-slate-200 pt-1.5 text-base font-bold text-slate-800">
+                  <span>Total</span><span>{money(pricePreview.total)}</span>
+                </div>
+                {pricePreview.chargesTechTotal > 0 && (
+                  <div className="flex justify-between pt-1 text-xs font-medium text-amber-600"><span>Tech pay</span><span>{money(pricePreview.chargesTechTotal)}</span></div>
+                )}
+              </div>
+            </div>
           </section>
 
           {err && <p className="rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-600">{err}</p>}

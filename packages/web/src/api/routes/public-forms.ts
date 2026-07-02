@@ -693,6 +693,11 @@ async function submitWorkOrder(c: any, companyId: string, form: typeof schema.in
     fieldData,
     customerPhone: body.clientPhone || cu.phone || "",
     region: body.region || "",
+    // hourly charges from the form's ChargesEditor are carried as a rate
+    // model (mirrors how the admin work-order modal persists them) so
+    // recomputeBooking() bills the tiered hourly rate once the job's actual
+    // on-site time is recorded.
+    rateModel: body.rateModel ? JSON.stringify(body.rateModel) : "",
     lineItems: JSON.stringify(lineItems),
     price: svc.basePrice,
   });
