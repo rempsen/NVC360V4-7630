@@ -1,48 +1,41 @@
-# Fix: messages incorrectly auto-marked "read" by background polling
+# Fix: DNS verification stuck on "verifying" despite Resend confirming verified
 
-## Root cause (confirmed)
-Three GET endpoints mark messages as `read` as a SIDE EFFECT of merely being
-fetched:
-- GET /api/messages/direct (rider's own thread)
-- GET /api/messages/dispatch/:techId (dispatcher viewing one tech, via
-  DispatchMessenger ChatView, polls every 4s)
-- GET /api/fleet/:techId/thread (fleet map chat drawer, ALSO polls every 4s)
+## Root cause (confirmed via live testing against Resend's real API)
+bmdmaterials.com DNS records are correct and Resend's own `domains.get()`
+reports status: "verified" consistently. BUT our code calls
+`resend.domains.verify()` unconditionally on every poll (every 2 min, via
+server.ts pollEmailDomains -> triggerVerify) AND on every user click of
+"Check verification". Calling verify() on an ALREADY-verified domain
+re-triggers a fresh re-validation cycle, which resets Resend's own status to
+"pending" for ~10s while it re-checks -- then it settles back to "verified".
+Because we call verify() again every 2 minutes (or whenever the user clicks
+the button), and then immediately read+persist the status via syncStatus()
+right after, we keep catching it mid-reset ("pending") rather than settled
+("verified") -- so the DB row/UI never advances out of "verifying".
 
-All three are polled continuously by React Query while their component is
-mounted -- including while backgrounded/unfocused. So messages get marked
-read moments after arriving, regardless of whether a human ever looked.
-This explains BOTH user reports:
-1. iOS badge not clearing after reading -- inverse timing gap, badge sync
-   lagged the poll.
-2. Dispatcher chat icon never showing unread -- if the fleet ChatDrawer OR
-   DispatchMessenger chat view for that tech had ever been opened (even
-   earlier, even backgrounded), it kept silently marking new tech messages
-   read on every subsequent poll, before the badge could ever register them.
+Confirmed empirically:
+- resend.domains.get() alone (no verify() call) -> "verified", stable, records
+  all show status "verified".
+- resend.domains.verify() then immediate get() -> "pending" (records also
+  flip to "pending").
+- get() again 10s later -> back to "verified".
 
 ## Fix
-Separate "fetch" from "mark read": GETs become pure reads. Add explicit
-POST .../mark-read endpoints, called ONCE by the frontend when a human
-actually opens/focuses that specific thread -- never from a poll.
+Only call verify() when the domain is NOT already verified. If Resend
+already reports "verified", skip the verify() call entirely and just persist
+that status -- never manufacture a fresh re-check on an already-good domain.
 
-1. Backend (messages.ts):
-   - GET /direct: remove auto-mark-read.
-   - NEW POST /direct/mark-read (rider explicitly acks reading dispatch's messages)
-   - GET /dispatch/:techId: remove auto-mark-read.
-   - NEW POST /dispatch/:techId/mark-read (dispatcher explicitly acks)
-2. Backend (fleet.ts):
-   - GET /:techId/thread: remove auto-mark-read.
-   - NEW POST /:techId/thread/mark-read
-3. Frontend web (dispatch-messenger.tsx ChatView): call mark-read once via
-   useEffect keyed on tech.techId (on open), NOT tied to the poll.
-4. Frontend web (fleet.tsx ChatDrawer): same treatment via api.fleet mark-read.
-5. Mobile (messages.tsx): call mark-read once on screen focus
-   (useFocusEffect), not from the 5s poll. Also immediately call
-   setAppBadgeCount(0) right after a successful mark-read so the OS badge
-   clears deterministically instead of waiting for the next _layout.tsx poll.
-6. Re-verify end to end: insert unread message, confirm poll does NOT clear
-   it, confirm explicit mark-read call DOES clear it and only it.
-7. tsc, tests, build for web; tsc for mobile.
-8. Regenerate + hand off new access code for the "Work Orders" form
-   (converted last turn from lead->work_order type, which reset its PIN).
+services/email-domains.ts:
+- triggerVerify(rowId): first call syncStatus() (pure get(), no side effects)
+  to see current status. If already "verified", return immediately -- do NOT
+  call resend.domains.verify(). Only call verify() when status is
+  pending/verifying/not_started/failed, to nudge Resend to re-check DNS.
 
-## Status: IMPLEMENTING
+## Plan
+1. Patch triggerVerify() per above.
+2. Manually re-run against the real bmdmaterials.com row to confirm the DB
+   row flips to "verified" and stays there across multiple poll cycles.
+3. tsc, tests, build.
+4. Commit + push.
+5. Report back to user with root cause + confirmation their domain is now
+   showing verified.

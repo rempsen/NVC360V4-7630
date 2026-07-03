@@ -156,6 +156,17 @@ export async function syncStatus(rowId: string) {
 /**
  * Ask Resend to (re)trigger verification, then sync status. Tenant "Check
  * verification" button + poller both call this.
+ *
+ * IMPORTANT: Resend's verify() endpoint re-triggers a fresh DNS re-check even
+ * on an ALREADY-verified domain — which flips its status to "pending" for
+ * several seconds while it re-validates, before settling back to "verified".
+ * Since we poll every 2 minutes (and the button can be clicked any time), if
+ * we called verify() unconditionally we'd keep re-arming that reset window
+ * and could catch the domain mid-reset ("pending") right after it had
+ * genuinely finished verifying — so a truly-verified domain could get stuck
+ * oscillating and never visibly settle in our UI. Fix: check current status
+ * first (a plain, side-effect-free get()); only call verify() to nudge a
+ * re-check when the domain isn't already verified.
  */
 export async function triggerVerify(rowId: string) {
   if (!resend) throw new Error("RESEND_API_KEY not configured");
@@ -166,6 +177,12 @@ export async function triggerVerify(rowId: string) {
     .limit(1);
   if (!row) throw new Error("domain row not found");
   if (!row.resendDomainId) return row; // not approved yet
+
+  // Pure read first — no side effects, safe to call as often as we like.
+  const current = await syncStatus(rowId);
+  if (current?.status === "verified") return current;
+
+  // Not verified yet — ask Resend to (re)check DNS, then read the fresh result.
   await resend.domains.verify(row.resendDomainId).catch(() => {});
   return syncStatus(rowId);
 }
