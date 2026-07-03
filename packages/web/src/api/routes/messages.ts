@@ -31,6 +31,23 @@ async function unreadDirectCountForRider(companyId: string, riderId: string): Pr
   return rows.filter((m) => m.senderRole === "dispatch").length;
 }
 
+/**
+ * Admin/superadmin users to notify for a message — SCOPED TO ONE TENANT ONLY.
+ *
+ * Messaging must be fully tenant-isolated: an admin/superadmin from one
+ * tenant must never see or be notified about another tenant's messages, even
+ * though `role` alone doesn't imply that. Always filter by companyId here —
+ * never query schema.user by role without it (that was the exact bug: a
+ * message in ANY tenant was notifying admins/superadmins across ALL
+ * tenants).
+ */
+async function officeUsersForNotify(companyId: string) {
+  return db
+    .select()
+    .from(schema.user)
+    .where(and(inArray(schema.user.role, ["admin", "superadmin"]), eq(schema.user.companyId, companyId)));
+}
+
 export const messagesRoutes = new Hono()
   // ── Direct dispatcher<->tech thread ──────────────────────────────────────
   // GET /api/messages/direct — rider fetches their own direct thread with dispatch
@@ -117,11 +134,8 @@ export const messagesRoutes = new Hono()
       channel: "app",
     });
 
-    // notify all admins (dispatchers)
-    const admins = await db
-      .select()
-      .from(schema.user)
-      .where(inArray(schema.user.role, ["admin", "superadmin"]));
+    // notify this tenant's admins/dispatchers ONLY — never other tenants.
+    const admins = await officeUsersForNotify(tenantId(c));
     for (const admin of admins) {
       await t.insert(schema.notifications, {
         userId: admin.id,
@@ -495,10 +509,8 @@ export const messagesRoutes = new Hono()
               title: "New message from customer",
               body,
             });
-            const admins = await db
-              .select()
-              .from(schema.user)
-              .where(inArray(schema.user.role, ["admin", "superadmin"]));
+            // notify this booking's own tenant admins ONLY — never other tenants.
+            const admins = await officeUsersForNotify(b.companyId);
             for (const admin of admins) {
               await t.insert(schema.notifications, {
                 userId: admin.id,

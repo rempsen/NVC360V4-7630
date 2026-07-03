@@ -1,41 +1,52 @@
-# Fix: DNS verification stuck on "verifying" despite Resend confirming verified
+# Messaging cross-tenant fix — DONE (Jul 3, 2026)
 
-## Root cause (confirmed via live testing against Resend's real API)
-bmdmaterials.com DNS records are correct and Resend's own `domains.get()`
-reports status: "verified" consistently. BUT our code calls
-`resend.domains.verify()` unconditionally on every poll (every 2 min, via
-server.ts pollEmailDomains -> triggerVerify) AND on every user click of
-"Check verification". Calling verify() on an ALREADY-verified domain
-re-triggers a fresh re-validation cycle, which resets Resend's own status to
-"pending" for ~10s while it re-checks -- then it settles back to "verified".
-Because we call verify() again every 2 minutes (or whenever the user clicks
-the button), and then immediately read+persist the status via syncStatus()
-right after, we keep catching it mid-reset ("pending") rather than settled
-("verified") -- so the DB row/UI never advances out of "verifying".
+## Fixed
+packages/web/src/api/routes/messages.ts:
+- Added `officeUsersForNotify(companyId)` helper — scopes admin/superadmin
+  lookup to ONE tenant (mirrors existing correct pattern `officeUsers()` in
+  services/dispatch.ts).
+- POST /direct (tech -> dispatch): now uses `officeUsersForNotify(tenantId(c))`
+  instead of unscoped `inArray(schema.user.role, ["admin","superadmin"])`.
+- POST /:bookingId (customer -> tech/dispatch, job thread): now uses
+  `officeUsersForNotify(b.companyId)` (the booking's own tenant) instead of
+  the same unscoped query.
 
-Confirmed empirically:
-- resend.domains.get() alone (no verify() call) -> "verified", stable, records
-  all show status "verified".
-- resend.domains.verify() then immediate get() -> "pending" (records also
-  flip to "pending").
-- get() again 10s later -> back to "verified".
+## Verified
+- tsc clean, 112/112 tests pass, build succeeds.
+- Real HTTP round-trip test (minted a session, POSTed to the live
+  /api/messages/direct endpoint): only the 3 admins/superadmins belonging to
+  the `default` tenant received a notifications row. Acme HVAC, Bolt
+  Plumbing, Precon Builders, and BMD Materials admins were correctly
+  excluded — confirmed by querying the notifications table after the real
+  request.
+- Isolated logic check also confirmed bmd-materials vs acme-hvac
+  officeUsersForNotify() results have zero overlap.
 
-## Fix
-Only call verify() when the domain is NOT already verified. If Resend
-already reports "verified", skip the verify() call entirely and just persist
-that status -- never manufacture a fresh re-check on an already-good domain.
+## Already-correct (re-verified, no changes needed)
+- GET/POST /dispatch/threads, /dispatch/:techId(/mark-read), /direct/unread,
+  /direct/mark-read, broadcast, tags/skill-classes/skills — all properly
+  scoped via tx(c) or explicit companyId filters.
+- fleet.ts direct-thread endpoints — all via tx(c), already tenant-safe.
+- mcp.ts message tool handlers — receive pre-scoped TenantDb, already safe.
 
-services/email-domains.ts:
-- triggerVerify(rowId): first call syncStatus() (pure get(), no side effects)
-  to see current status. If already "verified", return immediately -- do NOT
-  call resend.domains.verify(). Only call verify() when status is
-  pending/verifying/not_started/failed, to nudge Resend to re-check DNS.
+## Data quality note (found during testing, NOT part of this fix — flagged for user)
+Some rider rows have a companyId that doesn't match their linked user's
+companyId (e.g. BMD Materials' seed rider "Mr Floor Install"
+contact@bmdmaterials.com has riders.company_id = bmd-materials but
+user.company_id = default). This is a pre-existing data inconsistency
+unrelated to the messaging fix — did not touch it, but worth a cleanup pass
+if it's not intentional multi-tenant staff sharing.
 
-## Plan
-1. Patch triggerVerify() per above.
-2. Manually re-run against the real bmdmaterials.com row to confirm the DB
-   row flips to "verified" and stays there across multiple poll cycles.
-3. tsc, tests, build.
-4. Commit + push.
-5. Report back to user with root cause + confirmation their domain is now
-   showing verified.
+## Committed
+Pending commit + push (see below).
+
+---
+
+# Service Zones blank map (BMD Materials) — ON HOLD per user
+
+User asked to hold this fix. Live-tested on both dev sandbox and production
+(uberize.ai) as superadmin acting as BMD Materials — map rendered correctly
+with visible tiles in both cases, could not reproduce the reported blank-map
+issue. No code changes made. User will retest on their Mac/Chrome test
+machine and report back with specifics (console errors, whether hard refresh
+helps, etc.).
