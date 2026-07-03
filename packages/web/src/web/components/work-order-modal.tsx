@@ -31,7 +31,7 @@ import {
 import { apiHeaders } from "../lib/api";
 import { useWorkerNoun } from "../lib/use-brand";
 import { api } from "../lib/api";
-import { Modal, Field, inputCls, BtnGhost, BtnPrimary } from "./modal";
+import { Modal, Field, inputCls, BtnGhost, BtnPrimary, ConfirmModal } from "./modal";
 import { PRIORITY_META, money } from "../lib/utils";
 import { ChargesEditor, chargesSummary, type Charge } from "./charges-editor";
 import {
@@ -449,6 +449,14 @@ export function WorkOrderModal({
 
   // custom fields
   const [customFields, setCustomFields] = useState<CustomField[]>([]);
+  // Tracks whether the CURRENT custom fields came from a template load (vs.
+  // hand-built by the office). Lets the Template dropdown safely refresh
+  // fields when switching templates, while still protecting hand-built work
+  // (see pendingTemplateSwap below).
+  const [fieldsFromTemplate, setFieldsFromTemplate] = useState(false);
+  // Holds a template id awaiting user confirmation before it replaces
+  // hand-built custom fields (set by the Template <select> onChange).
+  const [pendingTemplateSwap, setPendingTemplateSwap] = useState<string | null>(null);
 
   // catalog line items
   const [lineItems, setLineItems] = useState<LineItem[]>([]);
@@ -635,6 +643,10 @@ export function WorkOrderModal({
         if (Array.isArray(fd._customFields)) setCustomFields(fd._customFields);
         else setCustomFields([]);
       } catch { setCustomFields([]); }
+      // Editing an existing booking: fields are whatever was saved, not a
+      // fresh template load — template switching stays manual/explicit here.
+      setFieldsFromTemplate(false);
+      setPendingTemplateSwap(null);
     } else {
       setScheduledAt(toLocalInput(defaultDate));
       setRiderId(defaultRiderId ?? "");
@@ -643,6 +655,8 @@ export function WorkOrderModal({
       setTechFilter("");
       setCustomFields([]);
       setLineItems([]);
+      setFieldsFromTemplate(false);
+      setPendingTemplateSwap(null);
     }
   }, [open, defaultDate, defaultRiderId, editBooking]);
 
@@ -762,6 +776,7 @@ export function WorkOrderModal({
     setNotes(""); setStaffNotes(""); setRegion("");
     setRateModel({ ...EMPTY_RATE_MODEL }); setRateTouched(false); setCharges([]);
     setEstMinutes("60"); setEstKm("0"); setCustomFields([]); setLineItems([]);
+    setFieldsFromTemplate(false); setPendingTemplateSwap(null);
   }
 
   function addCatalogItem(item: CatalogItem, qty: number) {
@@ -828,11 +843,19 @@ export function WorkOrderModal({
       ...prev,
       { id: uid(), type, label: meta.label, required: false },
     ]);
+    // Hand-adding a field means these fields are no longer purely
+    // template-sourced — protect them from a silent template swap.
+    setFieldsFromTemplate(false);
   }
 
   const busy = create.isPending || update.isPending;
 
+  const pendingTemplateName = pendingTemplateSwap
+    ? (templates.data?.templates ?? []).find((t: any) => t.id === pendingTemplateSwap)?.name ?? "this template"
+    : "";
+
   return (
+    <>
     <Modal
       open={open}
       onClose={onClose}
@@ -878,17 +901,40 @@ export function WorkOrderModal({
             value={templateId}
             onChange={(e) => {
               const id = e.target.value;
-              setTemplateId(id);
-              // Only auto-load fields for a BRAND NEW work order, and only if
-              // the office hasn't already built out custom fields by hand —
-              // never clobber existing work. This is what makes template
-              // fields (text/number/checkbox/dropdown/photo/signature/date)
-              // actually show up and be fillable, instead of being saved by
-              // the Form Builder and never used anywhere.
-              if (!editBooking && customFields.length === 0 && id) {
-                const tpl = (templates.data?.templates ?? []).find((t: any) => t.id === id);
-                if (tpl) setCustomFields(templateFieldsToCustomFields(tpl.fields));
+              // Only auto-manage fields for a BRAND NEW work order — editing
+              // an existing booking's template stays manual/explicit.
+              if (editBooking) { setTemplateId(id); return; }
+
+              if (customFields.length === 0) {
+                // Nothing to protect — just load the picked template's fields
+                // (or clear them if "None" was picked).
+                setTemplateId(id);
+                if (id) {
+                  const tpl = (templates.data?.templates ?? []).find((t: any) => t.id === id);
+                  if (tpl) { setCustomFields(templateFieldsToCustomFields(tpl.fields)); setFieldsFromTemplate(true); }
+                }
+                return;
               }
+
+              if (fieldsFromTemplate) {
+                // Current fields came from a previous template pick (nothing
+                // hand-added since) — switching templates should refresh them,
+                // that's the whole point of "pick a different template."
+                setTemplateId(id);
+                if (id) {
+                  const tpl = (templates.data?.templates ?? []).find((t: any) => t.id === id);
+                  setCustomFields(tpl ? templateFieldsToCustomFields(tpl.fields) : []);
+                } else {
+                  setCustomFields([]);
+                  setFieldsFromTemplate(false);
+                }
+                return;
+              }
+
+              // Existing fields were hand-built (no template involved) —
+              // never silently clobber them. Ask first.
+              if (!id) { setTemplateId(id); return; } // picking "None" never destroys hand-built fields
+              setPendingTemplateSwap(id);
             }}
             className={inputCls}
           >
@@ -1214,14 +1260,19 @@ export function WorkOrderModal({
                 <CfCard
                   key={cf.id}
                   cf={cf}
-                  onChange={(updated) =>
+                  onChange={(updated) => {
                     setCustomFields((prev) =>
                       prev.map((x) => (x.id === cf.id ? updated : x)),
-                    )
-                  }
-                  onRemove={() =>
-                    setCustomFields((prev) => prev.filter((x) => x.id !== cf.id))
-                  }
+                    );
+                    // Editing a field (even one that came from a template)
+                    // means the fields have diverged from that template —
+                    // protect this hand-touched work from a silent swap.
+                    setFieldsFromTemplate(false);
+                  }}
+                  onRemove={() => {
+                    setCustomFields((prev) => prev.filter((x) => x.id !== cf.id));
+                    setFieldsFromTemplate(false);
+                  }}
                 />
               ))}
               {/* add another inline */}
@@ -1244,6 +1295,24 @@ export function WorkOrderModal({
         <p className="mt-3 rounded-lg bg-red-500/10 px-3 py-2 text-sm text-red-400">{err}</p>
       )}
     </Modal>
+
+    <ConfirmModal
+      open={!!pendingTemplateSwap}
+      onClose={() => setPendingTemplateSwap(null)}
+      onConfirm={() => {
+        const id = pendingTemplateSwap!;
+        setTemplateId(id);
+        const tpl = (templates.data?.templates ?? []).find((t: any) => t.id === id);
+        setCustomFields(tpl ? templateFieldsToCustomFields(tpl.fields) : []);
+        setFieldsFromTemplate(true);
+        setPendingTemplateSwap(null);
+      }}
+      title="Replace custom fields?"
+      message={`Switching to "${pendingTemplateName}" will replace your current custom fields with this template's fields. Your existing custom fields will be lost.`}
+      confirmLabel="Replace fields"
+      danger
+    />
+    </>
   );
 }
 
